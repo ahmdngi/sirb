@@ -8,6 +8,7 @@ from .persistence import Checkpointer
 from .blackboard import Blackboard
 from .correlation import CorrelationEngine
 from .aggregator import Aggregator
+from .trends import TrendTracker
 from .throttle import TokenBucket, TokenBucketPool
 
 __all__ = [

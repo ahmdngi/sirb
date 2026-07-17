@@ -61,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     init_p = sub.add_parser("init", help="Create a skeleton worker module")
 
+    # dashboard
+    dash_p = sub.add_parser("dashboard", help="Start live SSE dashboard for a running/previous run")
+    dash_p.add_argument("--port", type=int, default=8100,
+                        help="HTTP port (default: 8100)")
+    dash_p.add_argument("--run-id", help="Specific run to watch (default: latest)")
+
     return p
 
 
@@ -74,6 +80,8 @@ def main(argv: list[str] = None):
         return _init_worker(args)
     elif args.command == "run":
         return _run(args)
+    elif args.command == "dashboard":
+        return _dashboard(args)
 
     parser.print_help()
     return 1
@@ -400,6 +408,20 @@ def _run(args) -> int:
         assessment_path.parent.mkdir(parents=True, exist_ok=True)
         assessment_path.write_text(assessment_md)
         print(f"       assessment: {assessment_path}")
+        # Save trend summary + render delta
+        try:
+            from sirb.core import TrendTracker
+            tracker = TrendTracker(str(checkpointer._runs_dir))
+            tracker.save_summary(run_id, assessment)
+            prev = tracker.previous_summaries(run_id)
+            if prev:
+                delta = tracker.delta(assessment, prev[0])
+                if delta.get("has_change"):
+                    delta_md = tracker.render_delta_markdown(delta, prev[0].get("run_id", "?"))
+                    print()
+                    print(delta_md)
+        except Exception as e:
+            print(f"       [sirb] WARN: trend tracking failed: {e}")
     except Exception as e:
         print(f"       [sirb] WARN: assessment generation failed: {e}")
 
@@ -429,7 +451,7 @@ def _run(args) -> int:
 
 
 def _discover_workers(worker_config) -> WorkerRegistry:
-    """Discover workers from config and package auto-discover.
+    """Discover workers from config, entry points, and package auto-discover.
 
     ``worker_config`` can be:
     - A list of module names: `["my-worker"]`
@@ -459,6 +481,206 @@ def _discover_workers(worker_config) -> WorkerRegistry:
         registry.discover(worker_modules)
 
     return registry
+
+
+# ── dashboard ────────────────────────────────────────────────────────────
+
+def _dashboard(args):
+    """Start a live SSE dashboard showing swarm progress.
+
+    Serves an HTML page at http://localhost:{port} that connects to SSE
+    and shows real-time task progress by polling the latest run's
+    checkpoint files.
+    """
+    import http.server
+    import json
+    import urllib.parse
+    from pathlib import Path
+
+    runs_dir = Path(args.run_dir).expanduser() / "runs" if hasattr(args, "run_dir") and args.run_dir else Path(
+        "~/hermes-vault/sirb-reports"
+    ).expanduser() / "runs"
+    port = args.port
+    run_id = args.run_id
+
+    # ── SSE handler ──────────────────────────────────────────────────
+
+    class SSEHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # suppress default HTTP log noise
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+
+            if path == "/":
+                self._serve_html()
+            elif path == "/events":
+                self._serve_sse()
+            elif path == "/status":
+                self._serve_status()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _serve_html(self):
+            html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sirb Dashboard</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 640px; margin: 2em auto; background: #0d1117; color: #c9d1d9; }}
+  h1 {{ color: #58a6ff; }}
+  .stat {{ display: flex; justify-content: space-between; padding: 0.5em; border-bottom: 1px solid #21262d; }}
+  .stat-label {{ color: #8b949e; }}
+  .stat-value {{ font-weight: bold; }}
+  .critical {{ color: #f85149; }}
+  .high {{ color: #d29922; }}
+  .info {{ color: #58a6ff; }}
+  .delta {{ margin-top: 1em; padding: 1em; background: #161b22; border-radius: 6px; }}
+  .delta pre {{ white-space: pre-wrap; font-size: 0.85em; }}
+  #sse-status {{ font-size: 0.8em; color: #8b949e; }}
+</style>
+</head>
+<body>
+<h1>🐝 Sirb Swarm Dashboard</h1>
+<p>Run: <span id="run-id">—</span> | <span id="sse-status">connecting...</span></p>
+<div id="stats"></div>
+<div id="delta"></div>
+<script>
+const evt = new EventSource("/events");
+const sseStatus = document.getElementById("sse-status");
+evt.onopen = () => sseStatus.textContent = "connected";
+evt.onerror = () => sseStatus.textContent = "disconnected";
+evt.onmessage = (e) => {{
+  try {{
+    const d = JSON.parse(e.data);
+    if (d.type === "init") {{
+      document.getElementById("run-id").textContent = d.run_id;
+    }}
+    else if (d.type === "stats") {{
+      let html = "";
+      for (const [k, v] of Object.entries(d.data)) {{
+        html += `<div class="stat"><span class="stat-label">${{k}}</span><span class="stat-value ${{k.toLowerCase()}}">${{v}}</span></div>`;
+      }}
+      document.getElementById("stats").innerHTML = html;
+    }}
+    else if (d.type === "delta") {{
+      document.getElementById("delta").innerHTML =
+        `<div class="delta"><pre>${{d.markdown}}</pre></div>`;
+    }}
+  }} catch(e) {{}}
+}};
+</script>
+</body>
+</html>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(html.encode())
+
+        def _serve_sse(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            # Resolve run to watch
+            target_run_id = run_id or self._latest_run_id()
+            if target_run_id:
+                init_msg = json.dumps({"type": "init", "run_id": target_run_id})
+                self.wfile.write(f"data: {init_msg}\n\n".encode())
+                self.wfile.flush()
+
+            # Poll the checkpoint file every 2 seconds
+            import time
+            try:
+                while True:
+                    target_run_id = run_id or self._latest_run_id()
+                    if target_run_id:
+                        status = self._read_run_status(target_run_id)
+                        if status:
+                            msg = json.dumps({"type": "stats", "data": status})
+                            self.wfile.write(f"data: {msg}\n\n".encode())
+                            self.wfile.flush()
+
+                            # Also read delta if available
+                            delta = self._read_delta(target_run_id)
+                            if delta:
+                                dmsg = json.dumps(
+                                    {"type": "delta", "markdown": delta})
+                                self.wfile.write(
+                                    f"data: {dmsg}\n\n".encode())
+                                self.wfile.flush()
+
+                    time.sleep(2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _latest_run_id(self):
+            d = _get_runs_dir(args)
+            if not d.exists():
+                return None
+            runs = sorted(d.iterdir(), reverse=True)
+            for r in runs:
+                if r.is_dir() and (r / "task_queue.json").exists():
+                    return r.name
+            return None
+
+        def _read_run_status(self, rid):
+            d = _get_runs_dir(args)
+            qp = d / rid / "task_queue.json"
+            if not qp.exists():
+                return None
+            try:
+                data = json.loads(qp.read_text())
+                tasks = data.get("tasks", {})
+                statuses = {}
+                for t in tasks.values():
+                    s = t.get("status", "unknown")
+                    statuses[s] = statuses.get(s, 0) + 1
+                total = len(tasks)
+                done = statuses.get("completed", 0)
+                return {
+                    "Progress": f"{done}/{total}",
+                    "Completed": done,
+                    "Pending": statuses.get("pending", 0),
+                    "Running": statuses.get("running", 0),
+                    "Failed": statuses.get("failed", 0),
+                    "Total": total,
+                }
+            except Exception:
+                return None
+
+        def _read_delta(self, rid):
+            d = _get_runs_dir(args)
+            md = d / rid / "assessment.md"
+            if not md.exists():
+                return None
+            # Show last 10 lines of assessment for trend context
+            try:
+                lines = md.read_text().splitlines()
+                return "\n".join(lines[:20])
+            except Exception:
+                return None
+
+    server = http.server.HTTPServer(("0.0.0.0", port), SSEHandler)
+    print(f"[sirb] Dashboard at http://localhost:{port}")
+    print(f"[sirb] Watching run: {run_id or '(latest)'}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[sirb] dashboard stopped")
+        server.server_close()
+    return 0
+
+
+def _get_runs_dir(args):
+    run_dir = getattr(args, "run_dir", None) or "~/hermes-vault/sirb-reports"
+    return Path(run_dir).expanduser() / "runs"
 
 
 if __name__ == "__main__":
