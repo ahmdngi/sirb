@@ -492,12 +492,14 @@ def _dashboard(args):
     import json
     import os
     import signal
+    import socket
     import subprocess
     import sys
     import threading
     import time
     import urllib.parse
     from pathlib import Path
+    from http.server import ThreadingHTTPServer
 
     port = args.port
     run_id_filter = args.run_id
@@ -577,6 +579,8 @@ def _dashboard(args):
                 self._serve_html()
             elif path == "/events":
                 self._serve_sse()
+            elif path == "/health":
+                self._send_json({"status": "ok", "time": time.time()})
             elif path == "/runs":
                 self._send_json(_list_runs())
             elif path.startswith("/run/") and path.endswith("/json"):
@@ -1124,8 +1128,10 @@ setInterval(loadRuns, 5000);
             except Exception:
                 return None
 
-    server = http.server.HTTPServer(("0.0.0.0", port), DashHandler)
-    print(f"[sirb] Dashboard at http://localhost:{port}")
+    server = ThreadingHTTPServer(("0.0.0.0", port), DashHandler)
+    server.socket.settimeout(1.0)  # don't hang forever on stale connections
+    server.timeout = 0.5
+    print(f"[sirb] Dashboard at http://0.0.0.0:{port}")
     print(f"[sirb] Watching runs at {runs_base}")
     try:
         server.serve_forever()
