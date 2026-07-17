@@ -655,6 +655,43 @@ def _dashboard(args):
                     self._send_json({"status": "stopped"})
                 else:
                     self._send_json({"status": "not_running"})
+
+            elif path == "/run/geo":
+                lat = params.get("lat", [""])[0].strip()
+                lon = params.get("lon", [""])[0].strip()
+                radius = params.get("radius", ["50"])[0].strip()
+                label = params.get("label", [f"{lat},{lon}"])[0].strip()
+                if not lat or not lon:
+                    self._send_json({"error": "lat and lon required"}, 400)
+                    return
+                # Write temp config with geo_targets
+                import tempfile
+                tf = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, prefix="sirb-geo-")
+                geo_cfg = [{"lat": float(lat), "lon": float(lon),
+                            "radius_km": float(radius), "label": label}]
+                tf.write(json.dumps(geo_cfg))
+                tf.close()
+                hermes_python = sys.executable
+                env = os.environ.copy()
+                env["SIRB_GEO_TARGETS"] = json.dumps(geo_cfg)
+                args_list = [hermes_python, "-m", "sirb", "run"]
+                try:
+                    proc = subprocess.Popen(
+                        args_list, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, env=env,
+                    )
+                    run_id = f"geo-{int(time.time())}"
+                    with proc_lock:
+                        running_procs[run_id] = proc
+                    threading.Thread(
+                        target=lambda pid, p: [p.stdout.read()] or
+                        running_procs.pop(pid, None),
+                        args=(run_id, proc), daemon=True,
+                    ).start()
+                    self._send_json({"run_id": run_id, "status": "started"})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
             else:
                 self._send_json({"error": "not found"}, 404)
 
@@ -753,6 +790,25 @@ th { color: #8b949e; font-weight: 600; }
       </div>
       <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
       <button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button>
+      <hr style="border-color:#30363d;margin:1em 0;" />
+      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Geo Location Scan</h3>
+      <div class="form-group">
+        <label>Latitude</label>
+        <input id="geo-lat" placeholder="59.5" />
+      </div>
+      <div class="form-group">
+        <label>Longitude</label>
+        <input id="geo-lon" placeholder="24.5" />
+      </div>
+      <div class="form-group">
+        <label>Radius (km)</label>
+        <input id="geo-radius" placeholder="50" value="50" />
+      </div>
+      <div class="form-group">
+        <label>Label (optional)</label>
+        <input id="geo-label" placeholder="Tallinn Bay" />
+      </div>
+      <button class="btn btn-primary" id="geo-btn" onclick="launchGeo()">▶ Scan Area</button>
       <hr style="border-color:#30363d;margin:1em 0;" />
       <h3 style="color:#58a6ff;margin-bottom:0.5em;">Vessel Positions</h3>
       <div id="map"></div>
@@ -886,6 +942,32 @@ async function stopRun() {
   document.getElementById("stop-btn").style.display = "none";
   document.getElementById("selected-run").textContent = "Stopped: " + currentRunId;
   setTimeout(loadRuns, 1000);
+}
+
+async function launchGeo() {
+  const lat = document.getElementById("geo-lat").value.trim();
+  const lon = document.getElementById("geo-lon").value.trim();
+  const radius = document.getElementById("geo-radius").value.trim() || "50";
+  const label = document.getElementById("geo-label").value.trim() || (lat + "," + lon);
+  if (!lat || !lon) { alert("Enter latitude and longitude"); return; }
+  document.getElementById("geo-btn").disabled = true;
+  document.getElementById("geo-btn").textContent = "Scanning...";
+  try {
+    const r = await fetch("/run/geo", {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
+          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label),
+    });
+    const d = await r.json();
+    if (d.run_id) {
+      currentRunId = d.run_id;
+      document.getElementById("selected-run").textContent = "Geo scan: " + d.run_id;
+      document.getElementById("assessment-view").textContent = "Geo scan launched. Waiting for discovery...";
+    } else if (d.error) { alert("Error: " + d.error); }
+  } catch(e) { alert("Failed: " + e); }
+  document.getElementById("geo-btn").disabled = false;
+  document.getElementById("geo-btn").textContent = "▶ Scan Area";
 }
 
 // Init
