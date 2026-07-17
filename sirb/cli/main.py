@@ -257,17 +257,43 @@ def _run(args) -> int:
 
     print(f"[sirb] starting swarm: {total} tasks, {args.max_workers} workers")
 
-    # Callback for checkpoint
+    # Register default triggers on the blackboard
+    blackboard.register_trigger(
+        {"severity": "critical", "source": "shodan"},
+        "alert_aggregator",
+    )
+    blackboard.register_trigger(
+        {"finding_type": "shadow_fleet_flag"},
+        "alert_aggregator",
+    )
+    blackboard.register_trigger(
+        {"severity": "critical"},
+        "alert_aggregator",
+    )
+    blackboard.register_trigger(
+        {"finding_type": "shadow_fleet_flag"},
+        "log_summary",
+    )
+
+    # Callback for checkpoint + triggers
     completed_before = 0
 
     def on_complete(task, result):
         nonlocal completed_before
         completed_before += 1
 
-        # Write findings to blackboard
-        blackboard.add_many(result.findings)
+        # Write findings to blackboard and check triggers
+        for finding in result.findings:
+            blackboard.add(finding)
+            triggered = blackboard.check_triggers(finding)
+            for action in triggered:
+                if action == "alert_aggregator":
+                    print(
+                        f"  ⚠ TRIGGER: {finding.finding_type} "
+                        f"({finding.severity}) — {finding.target_id[:15]}"
+                    )
 
-        # Checkpoint periodically
+
         if not args.no_checkpoint and checkpointer.should_checkpoint(completed_before):
             checkpointer.save_all(run_id, queue, blackboard)
 
