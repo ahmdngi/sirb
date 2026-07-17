@@ -18,4 +18,7 @@ blackboard:
 #   - predicate: {severity: critical}
 #     action: alert
 
+# Webhook URL to POST assessment JSON to on run completion.
+# webhook: https://hooks.example.com/sirb
+
 output_dir: ~/hermes-vault/sirb-reports/
