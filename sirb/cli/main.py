@@ -486,99 +486,417 @@ def _discover_workers(worker_config) -> WorkerRegistry:
 # ── dashboard ────────────────────────────────────────────────────────────
 
 def _dashboard(args):
-    """Start a live SSE dashboard showing swarm progress.
+    """Full-featured dashboard: run history, live view, assessment browser, map, launch panel."""
 
-    Serves an HTML page at http://localhost:{port} that connects to SSE
-    and shows real-time task progress by polling the latest run's
-    checkpoint files.
-    """
     import http.server
     import json
+    import os
+    import signal
+    import subprocess
+    import sys
+    import threading
+    import time
     import urllib.parse
     from pathlib import Path
 
-    runs_dir = Path(args.run_dir).expanduser() / "runs" if hasattr(args, "run_dir") and args.run_dir else Path(
-        "~/hermes-vault/sirb-reports"
-    ).expanduser() / "runs"
     port = args.port
-    run_id = args.run_id
+    run_id_filter = args.run_id
+    runs_base = _get_runs_dir(args)
+    running_procs: dict[str, subprocess.Popen] = {}
+    proc_lock = threading.Lock()
 
-    # ── SSE handler ──────────────────────────────────────────────────
+    def _load_assessment(rid: str) -> str | None:
+        mdp = runs_base / rid / "assessment.md"
+        return mdp.read_text() if mdp.exists() else None
 
-    class SSEHandler(http.server.BaseHTTPRequestHandler):
+    def _load_assessment_json(rid: str) -> dict:
+        sjp = runs_base / rid / "assessment-summary.json"
+        if sjp.exists():
+            return json.loads(sjp.read_text())
+        return {}
+
+    def _list_runs() -> list[dict]:
+        if not runs_base.exists():
+            return []
+        out = []
+        for d in sorted(runs_base.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
+            qp = d / "task_queue.json"
+            ap = d / "assessment.md"
+            sjp = d / "assessment-summary.json"
+            mtime = d.stat().st_mtime if d.stat() else 0
+            info = {"id": d.name, "has_queue": qp.exists(),
+                    "has_assessment": ap.exists(), "mtime": mtime}
+            if sjp.exists():
+                try:
+                    s = json.loads(sjp.read_text())
+                    info["targets"] = s.get("unique_targets", 0)
+                    info["generated_at"] = s.get("generated_at", "")
+                except Exception:
+                    pass
+            out.append(info)
+        return out
+
+    def _vessel_positions(rid: str) -> list[dict]:
+        """Extract vessel lat/lon from a run's blackboard."""
+        bp = runs_base / rid / "blackboard.json"
+        if not bp.exists():
+            return []
+        try:
+            data = json.loads(bp.read_text())
+            findings = data.get("findings", [])
+            positions = []
+            for f in findings:
+                if f.get("finding_type") == "current_position":
+                    detail = f.get("detail", {})
+                    lat = detail.get("lat")
+                    lon = detail.get("lon")
+                    if lat and lon:
+                        positions.append({
+                            "target_id": f.get("target_id"),
+                            "lat": lat, "lon": lon,
+                            "destination": detail.get("destination", ""),
+                        })
+            return positions
+        except Exception:
+            return []
+
+    # ── Dashboard handler ──────────────────────────────────────────────
+
+    class DashHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            pass  # suppress default HTTP log noise
+            pass
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
 
             if path == "/":
                 self._serve_html()
             elif path == "/events":
                 self._serve_sse()
-            elif path == "/status":
-                self._serve_status()
+            elif path == "/runs":
+                self._send_json(_list_runs())
+            elif path.startswith("/run/") and path.endswith("/json"):
+                rid = path.split("/")[2]
+                self._send_json(_load_assessment_json(rid))
+            elif path.startswith("/run/") and path.endswith("/assessment"):
+                rid = path.split("/")[2]
+                md = _load_assessment(rid)
+                self._send_html(md or "<p>No assessment yet.</p>")
+            elif path.startswith("/run/") and path.endswith("/positions"):
+                rid = path.split("/")[2]
+                self._send_json(_vessel_positions(rid))
+            elif path == "/map":
+                self._serve_map_html()
             else:
                 self.send_response(404)
                 self.end_headers()
 
-        def _serve_html(self):
-            html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Sirb Dashboard</title>
-<style>
-  body {{ font-family: system-ui, sans-serif; max-width: 640px; margin: 2em auto; background: #0d1117; color: #c9d1d9; }}
-  h1 {{ color: #58a6ff; }}
-  .stat {{ display: flex; justify-content: space-between; padding: 0.5em; border-bottom: 1px solid #21262d; }}
-  .stat-label {{ color: #8b949e; }}
-  .stat-value {{ font-weight: bold; }}
-  .critical {{ color: #f85149; }}
-  .high {{ color: #d29922; }}
-  .info {{ color: #58a6ff; }}
-  .delta {{ margin-top: 1em; padding: 1em; background: #161b22; border-radius: 6px; }}
-  .delta pre {{ white-space: pre-wrap; font-size: 0.85em; }}
-  #sse-status {{ font-size: 0.8em; color: #8b949e; }}
-</style>
-</head>
-<body>
-<h1>🐝 Sirb Swarm Dashboard</h1>
-<p>Run: <span id="run-id">—</span> | <span id="sse-status">connecting...</span></p>
-<div id="stats"></div>
-<div id="delta"></div>
-<script>
-const evt = new EventSource("/events");
-const sseStatus = document.getElementById("sse-status");
-evt.onopen = () => sseStatus.textContent = "connected";
-evt.onerror = () => sseStatus.textContent = "disconnected";
-evt.onmessage = (e) => {{
-  try {{
-    const d = JSON.parse(e.data);
-    if (d.type === "init") {{
-      document.getElementById("run-id").textContent = d.run_id;
-    }}
-    else if (d.type === "stats") {{
-      let html = "";
-      for (const [k, v] of Object.entries(d.data)) {{
-        html += `<div class="stat"><span class="stat-label">${{k}}</span><span class="stat-value ${{k.toLowerCase()}}">${{v}}</span></div>`;
-      }}
-      document.getElementById("stats").innerHTML = html;
-    }}
-    else if (d.type === "delta") {{
-      document.getElementById("delta").innerHTML =
-        `<div class="delta"><pre>${{d.markdown}}</pre></div>`;
-    }}
-  }} catch(e) {{}}
-}};
-</script>
-</body>
-</html>"""
-            self.send_response(200)
+        def do_POST(self):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len).decode() if content_len else ""
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            params = urllib.parse.parse_qs(body)
+
+            if path == "/run/new":
+                mmsis = params.get("mmsi", [""])[0].strip()
+                mode = params.get("mode", ["fast"])[0].strip()
+                if not mmsis:
+                    self._send_json({"error": "No MMSI provided"}, 400)
+                    return
+                mmsi_list = [m.strip() for m in mmsis.replace(",", " ").split() if m.strip()]
+                tasks_json = json.dumps({"mmsi": mmsi_list if len(mmsi_list) > 1 else mmsi_list[0],
+                                          "mode": mode})
+                # Write to temp file for sirb run --tasks
+                import tempfile
+                tf = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, prefix="sirb-dash-")
+                tf.write(json.dumps({"tasks": [{"mmsi": mmsi_list if len(mmsi_list) > 1 else mmsi_list[0],
+                                                "mode": mode}]}))
+                tf.close()
+                hermes_python = sys.executable
+                args_list = [hermes_python, "-m", "sirb", "run",
+                             "--tasks", tf.name]
+                env = os.environ.copy()
+                env["SIRB_RUN_DIR"] = str(runs_base.parent)
+                try:
+                    proc = subprocess.Popen(
+                        args_list + ["--tasks", tasks_json],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, env=env,
+                    )
+                    run_id = f"web-{int(time.time())}"
+                    with proc_lock:
+                        running_procs[run_id] = proc
+                    # Log output in background
+                    def _log_output(pid, p):
+                        for line in p.stdout:
+                            line = line.rstrip()
+                        with proc_lock:
+                            running_procs.pop(pid, None)
+                    threading.Thread(target=_log_output, args=(run_id, proc), daemon=True).start()
+                    self._send_json({"run_id": run_id, "status": "started"})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+
+            elif path.startswith("/run/") and path.endswith("/stop"):
+                rid = path.split("/")[2]
+                with proc_lock:
+                    proc = running_procs.pop(rid, None)
+                if proc:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    self._send_json({"status": "stopped"})
+                else:
+                    self._send_json({"status": "not_running"})
+            else:
+                self._send_json({"error": "not found"}, 404)
+
+        # ── response helpers ──────────────────────────────────────────
+
+        def _send_json(self, data, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+
+        def _send_html(self, html, status=200):
+            self.send_response(status)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(html.encode())
+
+        # ── main HTML page ────────────────────────────────────────────
+
+        def _serve_html(self):
+            html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sirb Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; height: 100vh; }
+.sidebar { width: 260px; background: #161b22; border-right: 1px solid #30363d; padding: 1em; overflow-y: auto; flex-shrink: 0; }
+.sidebar h2 { color: #58a6ff; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.5em; }
+.sidebar .run-item { padding: 0.5em; cursor: pointer; border-radius: 4px; margin-bottom: 2px; font-size: 0.85em; }
+.sidebar .run-item:hover { background: #21262d; }
+.sidebar .run-item.active { background: #1f6feb; color: #fff; }
+.sidebar .run-item .date { font-size: 0.75em; color: #8b949e; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.main .top-bar { padding: 1em; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 1em; }
+.top-bar h1 { font-size: 1.2em; color: #58a6ff; }
+.top-bar #sse-status { font-size: 0.8em; color: #8b949e; margin-left: auto; }
+.content { flex: 1; display: flex; overflow: hidden; }
+.panel { flex: 1; padding: 1em; overflow-y: auto; min-width: 0; }
+.panel-right { width: 340px; padding: 1em; overflow-y: auto; background: #161b22; border-left: 1px solid #30363d; flex-shrink: 0; }
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5em; margin-bottom: 1em; }
+.stat-card { background: #21262d; border-radius: 6px; padding: 0.75em; text-align: center; }
+.stat-card .label { font-size: 0.75em; color: #8b949e; }
+.stat-card .value { font-size: 1.3em; font-weight: bold; }
+.critical { color: #f85149; } .high { color: #d29922; } .medium { color: #db6d28; }
+.info { color: #58a6ff; } .success { color: #3fb950; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+th, td { text-align: left; padding: 0.4em 0.5em; border-bottom: 1px solid #21262d; }
+th { color: #8b949e; font-weight: 600; }
+#assessment-view { white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; }
+.form-group { margin-bottom: 0.75em; }
+.form-group label { display: block; font-size: 0.85em; color: #8b949e; margin-bottom: 0.25em; }
+.form-group input, .form-group select { width: 100%; padding: 0.5em; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; }
+.btn { padding: 0.5em 1em; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
+.btn-primary { background: #1f6feb; color: #fff; }
+.btn-primary:hover { background: #388bfd; }
+.btn-danger { background: #da3633; color: #fff; }
+.btn-danger:hover { background: #f85149; }
+#map { height: 300px; border-radius: 6px; margin-top: 0.5em; }
+.log-line { font-family: monospace; font-size: 0.8em; color: #8b949e; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="sidebar" id="sidebar">
+  <h2>Runs</h2>
+  <div id="run-list"></div>
+</div>
+<div class="main">
+  <div class="top-bar">
+    <h1>🐝 Sirb Swarm v0.1.0</h1>
+    <span id="selected-run">No run selected</span>
+    <span id="sse-status">connecting...</span>
+  </div>
+  <div class="content">
+    <div class="panel" id="center-panel">
+      <div id="live-stats" class="stat-grid"></div>
+      <div id="assessment-view">Select a run to view its assessment.</div>
+    </div>
+    <div class="panel-right" id="right-panel">
+      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Launch Scan</h3>
+      <div class="form-group">
+        <label>MMSI(s) — space or comma separated</label>
+        <input id="mmsi-input" placeholder="273342890 311000987" />
+      </div>
+      <div class="form-group">
+        <label>Mode</label>
+        <select id="mode-select">
+          <option value="fast">Fast (~2 min)</option>
+          <option value="deep">Deep (~10 min)</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
+      <button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button>
+      <hr style="border-color:#30363d;margin:1em 0;" />
+      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Vessel Positions</h3>
+      <div id="map"></div>
+      <div id="positions-info" style="font-size:0.8em;color:#8b949e;margin-top:0.5em;"></div>
+    </div>
+  </div>
+</div>
+<script>
+let currentRunId = null;
+let currentRunFromList = null;
+let map = null;
+let markers = [];
+const evt = new EventSource("/events");
+const sseStatus = document.getElementById("sse-status");
+
+evt.onopen = () => sseStatus.textContent = "connected";
+evt.onerror = () => sseStatus.textContent = "disconnected";
+evt.onmessage = (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    if (d.type === "stats" && d.run_id === (currentRunFromList || currentRunId)) {
+      renderStats(d.data);
+    }
+  } catch(e) {}
+};
+
+function renderStats(data) {
+  const el = document.getElementById("live-stats");
+  const cards = [
+    {label:"Progress", value:data.Progress, cls:""},
+    {label:"Completed", value:data.Completed, cls:"success"},
+    {label:"Pending", value:data.Pending, cls:"info"},
+    {label:"Running", value:data.Running, cls:"high"},
+    {label:"Failed", value:data.Failed, cls:"critical"},
+    {label:"Total", value:data.Total, cls:""},
+  ];
+  el.innerHTML = cards.map(c => `<div class="stat-card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`).join("");
+}
+
+async function loadRuns() {
+  const r = await fetch("/runs");
+  const runs = await r.json();
+  const el = document.getElementById("run-list");
+  el.innerHTML = runs.map(r => {
+    const dt = r.generated_at || new Date(r.mtime*1000).toLocaleString();
+    return `<div class="run-item" onclick="selectRun('${r.id}')" id="ri-${r.id}">
+      <div style="font-weight:${r.has_assessment?'bold':'normal'}">${r.id.slice(0,16)}</div>
+      <div class="date">${dt}${r.targets ? ' · '+r.targets+' targets' : ''}</div>
+    </div>`;
+  }).join("");
+}
+
+async function selectRun(rid) {
+  currentRunFromList = rid;
+  document.querySelectorAll(".run-item").forEach(el => el.classList.remove("active"));
+  const el = document.getElementById("ri-" + rid);
+  if (el) el.classList.add("active");
+  document.getElementById("selected-run").textContent = rid;
+
+  // Load assessment
+  const r = await fetch("/run/" + rid + "/assessment");
+  const html = await r.text();
+  document.getElementById("assessment-view").innerHTML = html;
+
+  // Load positions
+  loadPositions(rid);
+
+  // Try stats
+  const sr = await fetch("/run/" + rid + "/json");
+  try {
+    const sj = await sr.json();
+    renderStats({
+      Progress: sj.unique_targets + " targets",
+      Completed: sj.unique_targets || 0,
+      Pending: 0, Running: 0, Failed: 0,
+      Total: sj.unique_targets || 0,
+    });
+  } catch(e) {}
+}
+
+async function loadPositions(rid) {
+  const r = await fetch("/run/" + (rid || "") + "/positions");
+  const pts = await r.json();
+  const info = document.getElementById("positions-info");
+  if (!pts.length) { info.textContent = "No vessel positions found."; return; }
+  info.textContent = pts.length + " vessel(s) positioned";
+  if (!map) {
+    map = L.map("map").setView([59.5, 24.5], 5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:18}).addTo(map);
+  }
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  pts.forEach(p => {
+    const m = L.circleMarker([p.lat, p.lon], {radius:6, color:"#f85149", fillColor:"#f85149", fillOpacity:0.8})
+      .addTo(map)
+      .bindPopup(`<b>${p.target_id}</b><br/>Dest: ${p.destination}`);
+    markers.push(m);
+  });
+  if (pts.length) map.fitBounds(markers.map(m => m.getLatLng()), {padding:[30,30]});
+}
+
+async function launchRun() {
+  const mmsi = document.getElementById("mmsi-input").value.trim();
+  const mode = document.getElementById("mode-select").value;
+  if (!mmsi) { alert("Enter at least one MMSI"); return; }
+  document.getElementById("run-btn").disabled = true;
+  document.getElementById("run-btn").textContent = "Running...";
+  document.getElementById("stop-btn").style.display = "inline-block";
+  try {
+    const r = await fetch("/run/new", {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: "mmsi=" + encodeURIComponent(mmsi) + "&mode=" + encodeURIComponent(mode),
+    });
+    const d = await r.json();
+    if (d.run_id) {
+      currentRunId = d.run_id;
+      document.getElementById("selected-run").textContent = "Running: " + d.run_id;
+      document.getElementById("assessment-view").textContent = "Run launched. Waiting for checkpoint data...";
+    } else if (d.error) {
+      alert("Error: " + d.error);
+    }
+  } catch(e) { alert("Failed: " + e); }
+  document.getElementById("run-btn").disabled = false;
+  document.getElementById("run-btn").textContent = "▶ Run";
+}
+
+async function stopRun() {
+  if (!currentRunId) return;
+  await fetch("/run/" + currentRunId + "/stop", {method:"POST"});
+  document.getElementById("stop-btn").style.display = "none";
+  document.getElementById("selected-run").textContent = "Stopped: " + currentRunId;
+  setTimeout(loadRuns, 1000);
+}
+
+// Init
+loadRuns();
+setInterval(loadRuns, 5000);
+</script>
+</body>
+</html>"""
+            self._send_html(html)
+
+        # ── SSE ──────────────────────────────────────────────────────
 
         def _serve_sse(self):
             self.send_response(200)
@@ -588,34 +906,26 @@ evt.onmessage = (e) => {{
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            # Resolve run to watch
-            target_run_id = run_id or self._latest_run_id()
-            if target_run_id:
-                init_msg = json.dumps({"type": "init", "run_id": target_run_id})
-                self.wfile.write(f"data: {init_msg}\n\n".encode())
-                self.wfile.flush()
+            # Immediately send current run status on connect
+            target = run_id_filter or self._latest_run_id()
+            if target:
+                status = self._read_run_status(target)
+                if status:
+                    msg = json.dumps({"type": "stats", "data": status,
+                                       "run_id": target})
+                    self.wfile.write(f"data: {msg}\n\n".encode())
+                    self.wfile.flush()
 
-            # Poll the checkpoint file every 2 seconds
-            import time
             try:
                 while True:
-                    target_run_id = run_id or self._latest_run_id()
-                    if target_run_id:
-                        status = self._read_run_status(target_run_id)
+                    target = run_id_filter or self._latest_run_id()
+                    if target:
+                        status = self._read_run_status(target)
                         if status:
-                            msg = json.dumps({"type": "stats", "data": status})
+                            msg = json.dumps({"type": "stats", "data": status,
+                                               "run_id": target})
                             self.wfile.write(f"data: {msg}\n\n".encode())
                             self.wfile.flush()
-
-                            # Also read delta if available
-                            delta = self._read_delta(target_run_id)
-                            if delta:
-                                dmsg = json.dumps(
-                                    {"type": "delta", "markdown": delta})
-                                self.wfile.write(
-                                    f"data: {dmsg}\n\n".encode())
-                                self.wfile.flush()
-
                     time.sleep(2)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -624,8 +934,7 @@ evt.onmessage = (e) => {{
             d = _get_runs_dir(args)
             if not d.exists():
                 return None
-            runs = sorted(d.iterdir(), reverse=True)
-            for r in runs:
+            for r in sorted(d.iterdir(), reverse=True):
                 if r.is_dir() and (r / "task_queue.json").exists():
                     return r.name
             return None
@@ -655,21 +964,9 @@ evt.onmessage = (e) => {{
             except Exception:
                 return None
 
-        def _read_delta(self, rid):
-            d = _get_runs_dir(args)
-            md = d / rid / "assessment.md"
-            if not md.exists():
-                return None
-            # Show last 10 lines of assessment for trend context
-            try:
-                lines = md.read_text().splitlines()
-                return "\n".join(lines[:20])
-            except Exception:
-                return None
-
-    server = http.server.HTTPServer(("0.0.0.0", port), SSEHandler)
+    server = http.server.HTTPServer(("0.0.0.0", port), DashHandler)
     print(f"[sirb] Dashboard at http://localhost:{port}")
-    print(f"[sirb] Watching run: {run_id or '(latest)'}")
+    print(f"[sirb] Watching runs at {runs_base}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
