@@ -18,7 +18,7 @@ class WorkerRegistry(dict[str, SirbWorker]):
     Keys are ``SirbWorker.name``, values are instantiated worker objects.
     Behaves as a dict::
 
-        worker = registry["shipcrawler"]
+        worker = registry["my-worker"]
     """
 
     def discover(self, config_workers: dict[str, dict] = None,
@@ -27,7 +27,7 @@ class WorkerRegistry(dict[str, SirbWorker]):
 
         Args:
             config_workers: Dict mapping worker module names to their config,
-                e.g. ``{"shipcrawler": {"ports": ["tallinn"]}}``.
+                e.g. ``{"my-worker": {"option": "value"}}``.
                 A bare list of strings is also accepted for backward
                 compatibility (workers without config).
             scan_paths: Additional filesystem paths to scan for workers.

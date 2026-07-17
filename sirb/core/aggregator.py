@@ -1,9 +1,13 @@
-"""Aggregator — generates port/fleet assessment from findings + correlations."""
+"""Aggregator — generates assessment markdown from findings + correlations.
+
+Completely agnostic — works on any target type (device, service, person, etc.).
+Uses generic labels; domain-specific context is the user's responsibility.
+"""
 
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
 from .blackboard import Blackboard
 from .correlation import CorrelationEngine
@@ -13,46 +17,50 @@ from .models import Finding
 class Aggregator:
     """Generates a structured assessment from the blackboard and correlations.
 
-    Can produce per-type assessments (port risk, fleet intelligence) depending
-    on the ``target_type`` of findings in the blackboard.
+    Can produce assessments for any target type depending on what findings
+    exist in the blackboard.
     """
 
-    def __init__(self, output_dir: str = ""):
-        self._output_dir = output_dir
+    def __init__(self):
         self._correlation = CorrelationEngine()
 
     def assess(self, blackboard: Blackboard,
-               target_type: str = "vessel") -> dict[str, Any]:
+               target_type: str = "") -> dict[str, Any]:
         """Run a full assessment on findings in the blackboard.
 
         Args:
             blackboard: The findings store.
-            target_type: Filter to one target type ("vessel", "person", "port").
+            target_type: Optional filter — only assess findings for this
+                         target type. Empty string = all types.
 
         Returns:
             Dict with assessment data, ready to be rendered as markdown.
         """
-        findings = blackboard.query(target_type=target_type)
+        if target_type:
+            findings = blackboard.query(target_type=target_type)
+        else:
+            findings = blackboard.all()
+
         self._correlation.ingest(findings)
         correlations = self._correlation.all_correlations()
 
         return {
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "target_type": target_type,
+            "target_type": target_type or "all",
             **correlations,
-            "exposure_rate": self._exposure_rate(findings, correlations),
             "top_findings": self._top_findings(findings, limit=10),
+            "exposure_stats": self._exposure_stats(findings),
         }
 
     def render_markdown(self, assessment: dict[str, Any],
-                        title: str = "Port Assessment") -> str:
-        """Render an assessment dict as markdown."""
+                        title: str = "Assessment") -> str:
+        """Render an assessment dict as markdown with generic labels."""
         lines = [
             f"# {title}",
             f"",
             f"**Generated:** {assessment['generated_at']}  ",
             f"**Target type:** {assessment['target_type']}  ",
-            f"**Vessels analysed:** {assessment['vessel_count']}  ",
+            f"**Unique targets:** {assessment['unique_targets']}  ",
             f"",
             f"---",
             f"",
@@ -62,21 +70,16 @@ class Aggregator:
             f"|--------|-------|",
         ]
 
-        vc = assessment["vessel_count"]
-        lines.append(f"| Vessels analysed | {vc} |")
+        ut = assessment["unique_targets"]
+        lines.append(f"| Unique targets | {ut} |")
 
         # Risk tiers
         tiers = assessment.get("risk_tiers", {})
         for sev in ["critical", "high", "medium", "low", "info"]:
             n = tiers.get(sev, 0)
             if n > 0:
-                pct = round(n / vc * 100) if vc else 0
-                lines.append(f"| {sev.capitalize()} risk vessels | {n} ({pct}%) |")
-
-        # Exposure rate
-        exp = assessment.get("exposure_rate", {})
-        if exp.get("exposed", 0) > 0:
-            lines.append(f"| Vessels with Shodan exposure | {exp['exposed']} ({exp.get('rate', 0)}%) |")
+                pct = round(n / ut * 100) if ut else 0
+                lines.append(f"| {sev.capitalize()} severity targets | {n} ({pct}%) |")
 
         lines += [
             f"",
@@ -85,54 +88,48 @@ class Aggregator:
             f"| Severity | Count |",
             f"|----------|-------|",
         ]
-        for sev, cnt in assessment.get("severity_summary", {}).items():
+        for sev, cnt in assessment.get("severity", {}).items():
             lines.append(f"| {sev.capitalize()} | {cnt} |")
 
         lines += [
             f"",
-            f"## Shadow Fleet Indicators",
+            f"## Finding Types",
             f"",
+            f"| Type | Count |",
+            f"|------|-------|",
         ]
-        shadow = assessment.get("shadow_fleet_clusters", [])
-        if shadow:
-            for c in shadow:
-                lines.append(
-                    f"- **{c['indicator']}**: {c['count']} vessels — "
-                    f"{', '.join(c['vessels'][:5])}"
-                )
-        else:
-            lines.append("No shadow fleet indicators detected.")
+        for ftype, cnt in assessment.get("finding_types", {}).items():
+            lines.append(f"| {ftype} | {cnt} |")
 
-        lines += [
-            f"",
-            f"## Shared Infrastructure",
-            f"",
-        ]
-        vsat = assessment.get("shared_vsat", [])
-        if vsat:
-            for v in vsat:
-                lines.append(
-                    f"- **{v['product']}**: {v['count']} vessels — "
-                    f"{', '.join(v['vessels'][:5])}"
-                )
-        else:
-            lines.append("No shared VSAT infrastructure detected.")
-
-        mgmt = assessment.get("shared_management", [])
-        if mgmt:
+        # Shared attributes (if any)
+        shared_sources = assessment.get("shared_sources", [])
+        if shared_sources:
             lines += [
                 f"",
-                f"## Shared Management",
+                f"## Shared Sources",
                 f"",
             ]
-            for m in mgmt:
+            for s in shared_sources:
                 lines.append(
-                    f"- **{m['manager']}**: {m['count']} vessels"
+                    f"- **{s['value']}**: {s['count']} targets — "
+                    f"{', '.join(s['targets'][:5])}"
+                )
+
+        shared_types = assessment.get("shared_target_types", [])
+        if shared_types:
+            lines += [
+                f"",
+                f"## Shared Target Types",
+                f"",
+            ]
+            for t in shared_types:
+                lines.append(
+                    f"- **{t['value']}**: {t['count']} targets"
                 )
 
         lines += [
             f"",
-            f"## Top Findings",
+            f"## Top Findings by Severity",
             f"",
             f"| Target | Type | Severity | Detail |",
             f"|--------|------|----------|--------|",
@@ -140,55 +137,39 @@ class Aggregator:
         for f in assessment.get("top_findings", []):
             detail = str(f.get("detail", {}))[:60]
             lines.append(
-                f"| {f.get('target_id', '')[:15]} "
+                f"| {f.get('target_id', '')[:20]} "
                 f"| {f.get('finding_type', '')} "
                 f"| {f.get('severity', '')} "
                 f"| {detail} |"
             )
 
-        lines += [
-            f"",
-            f"---",
-            f"",
-            f"## Shared Flag Analysis",
-            f"",
-        ]
-        flags = assessment.get("shared_attributes", {}).get("flag", [])
-        if flags:
-            for f in flags:
-                lines.append(
-                    f"- **{f['value']}**: {f['count']} vessels"
-                )
-        else:
-            lines.append("No shared flags among analysed vessels.")
-
         return "\n".join(lines)
 
     # ── internal ────────────────────────────────────────────────────────
 
-    def _exposure_rate(self, findings: list[Finding],
-                       correlations: dict) -> dict:
-        """Calculate what percentage of vessels have Shodan exposure."""
-        exposed = set()
-        all_vessels = set()
+    def _exposure_stats(self, findings: list[Finding]) -> dict:
+        """Generic count of positive vs informational findings per target."""
+        positives: set[str] = set()
+        all_targets: set[str] = set()
 
         for f in findings:
             if f.target_id:
-                all_vessels.add(f.target_id)
-                if f.finding_type == "shodan_exposure":
-                    exposed.add(f.target_id)
+                all_targets.add(f.target_id)
+                if f.severity in ("critical", "high", "medium"):
+                    positives.add(f.target_id)
 
-        total = len(all_vessels)
+        total = len(all_targets)
         return {
-            "exposed": len(exposed),
-            "total": total,
-            "rate": round(len(exposed) / total * 100) if total else 0,
+            "positive_findings": len(positives),
+            "total_targets": total,
+            "rate": round(len(positives) / total * 100) if total else 0,
         }
 
     def _top_findings(self, findings: list[Finding],
                       limit: int = 10) -> list[dict]:
         """Return the highest-severity findings."""
-        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        severity_order = {"critical": 0, "high": 1, "medium": 2,
+                          "low": 3, "info": 4}
         sorted_f = sorted(
             findings,
             key=lambda f: severity_order.get(f.severity, 99),

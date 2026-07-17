@@ -1,8 +1,7 @@
-"""Cross-vessel correlation engine.
+"""Cross-finding correlation engine.
 
-Analyses findings across multiple vessels to surface patterns that no
-single-vessel report would reveal — shared managers, same VSAT provider,
-fleet-wide vulnerabilities, shadow fleet clusters.
+Groups findings by shared attributes to surface patterns across targets.
+Completely agnostic — works on any Finding regardless of domain.
 """
 
 from __future__ import annotations
@@ -14,7 +13,21 @@ from .models import Finding
 
 
 class CorrelationEngine:
-    """Correlate findings across vessels to identify fleet/port patterns."""
+    """Correlate findings across targets to identify shared patterns.
+
+    Usage::
+
+        engine = CorrelationEngine()
+        engine.ingest(findings)
+
+        # Count by severity
+        engine.count_by("severity")
+        # => {"critical": 5, "high": 3, "info": 10}
+
+        # Group by any detail key across all findings
+        engine.group_by_detail_key("flag")
+        # => [{"value": "palau", "targets": ["A","B"], "count": 2}]
+    """
 
     def __init__(self):
         self._findings: list[Finding] = []
@@ -26,105 +39,101 @@ class CorrelationEngine:
     def add(self, finding: Finding):
         self._findings.append(finding)
 
-    # ── correlations ────────────────────────────────────────────────────
+    # ── generic correlations ────────────────────────────────────────────
 
-    def shared_attributes(self, attr: str = "flag") -> list[dict]:
-        """Find vessels sharing the same attribute value.
+    def count_by(self, field: str = "severity") -> dict[str, int]:
+        """Count findings grouped by a field value.
 
-        E.g. ``shared_attributes("flag")`` → vessels sharing a flag.
-        E.g. ``shared_attributes("destination")`` → same destination port.
+        Args:
+            field: ``"severity"``, ``"finding_type"``, ``"source"``, etc.
+
+        Returns:
+            ``{"critical": 5, "high": 3, ...}``
         """
-        groups: dict[str, list[str]] = defaultdict(list)
-
+        counts: dict[str, int] = Counter()
         for f in self._findings:
-            # Check detail dict for the attribute
-            val = f.detail.get(attr)
+            val = getattr(f, field, None)
             if val:
-                groups[str(val)].append(f.target_id)
-
-        return [
-            {"value": val, "vessels": list(set(ids)), "count": len(set(ids))}
-            for val, ids in groups.items()
-            if len(set(ids)) > 1
-        ]
-
-    def shared_management(self) -> list[dict]:
-        """Find vessels under the same manager/owner."""
-        managers: dict[str, set[str]] = defaultdict(set)
-
-        for f in self._findings:
-            if f.finding_type == "ownership":
-                manager = f.detail.get("manager", f.detail.get("owner", ""))
-                if manager:
-                    managers[manager].add(f.target_id)
-
-        return [
-            {"manager": mgr, "vessels": sorted(vs), "count": len(vs)}
-            for mgr, vs in managers.items()
-            if len(vs) > 1
-        ]
-
-    def same_shadow_fleet_indicators(self) -> list[dict]:
-        """Cluster vessels with shadow fleet indicators."""
-        clusters: dict[str, list[str]] = defaultdict(list)
-
-        for f in self._findings:
-            if f.finding_type in ("shadow_fleet_flag", "no_pi_insurance"):
-                key = f.finding_type
-                clusters[key].append(f.target_id)
-
-        return [
-            {"indicator": key, "vessels": list(set(ids)), "count": len(set(ids))}
-            for key, ids in clusters.items()
-        ]
-
-    def shared_vsat(self) -> list[dict]:
-        """Find vessels with the same VSAT provider/model exposed on Shodan."""
-        vsat: dict[str, set[str]] = defaultdict(set)
-
-        for f in self._findings:
-            if f.finding_type == "exposed_service":
-                products = f.detail.get("products", [])
-                for p in products:
-                    if any(kw in p.upper() for kw in ["VSAT", "SAILOR", "KVH",
-                                                        "COBHAM", "INTELLIAN"]):
-                        vsat[p].add(f.target_id)
-
-        return [
-            {"product": prod, "vessels": sorted(vs), "count": len(vs)}
-            for prod, vs in vsat.items()
-            if len(vs) > 1
-        ]
-
-    def severity_summary(self) -> dict[str, int]:
-        """Count findings by severity across all vessels."""
-        counts: dict[str, int] = Counter()
-        for f in self._findings:
-            counts[f.severity] += 1
+                counts[str(val)] += 1
         return dict(counts)
 
-    def finding_type_summary(self) -> dict[str, int]:
-        """Count findings by type."""
-        counts: dict[str, int] = Counter()
-        for f in self._findings:
-            counts[f.finding_type] += 1
-        return dict(counts)
+    def count_by_type(self) -> dict[str, int]:
+        """Shorthand for count_by('finding_type')."""
+        return self.count_by("finding_type")
 
-    def vessel_count(self) -> int:
-        """Number of unique vessels in the findings."""
+    def count_by_severity(self) -> dict[str, int]:
+        """Shorthand for count_by('severity')."""
+        return self.count_by("severity")
+
+    def unique_targets(self) -> int:
+        """Number of unique target IDs in the findings."""
         return len({f.target_id for f in self._findings if f.target_id})
 
-    def risk_tiers(self) -> dict[str, int]:
-        """Count vessels by highest severity finding per vessel."""
+    def group_by_detail_key(self, key: str) -> list[dict]:
+        """Group findings that share the same value in ``detail[key]``.
+
+        Args:
+            key: Key inside each finding's ``detail`` dict, e.g. ``\"flag\"``,
+                 ``\"destination\"``, ``\"product\"``.
+
+        Returns:
+            List of ``{\"value\": ..., \"targets\": [...], \"count\": N}``
+            Only groups with **more than one target** are returned.
+        """
+        groups: dict[str, set[str]] = defaultdict(set)
+
+        for f in self._findings:
+            val = f.detail.get(key)
+            if val and f.target_id:
+                groups[str(val)].add(f.target_id)
+
+        return [
+            {"value": val, "targets": sorted(ids), "count": len(ids)}
+            for val, ids in groups.items()
+            if len(ids) > 1
+        ]
+
+    def group_by_field(self, field: str) -> list[dict]:
+        """Group findings that share the same value for a field.
+
+        Args:
+            field: ``\"source\"``, ``\"target_type\"``, etc.
+
+        Returns:
+            List of ``{\"value\": ..., \"targets\": [...], \"count\": N}``
+        """
+        groups: dict[str, set[str]] = defaultdict(set)
+
+        for f in self._findings:
+            val = getattr(f, field, None)
+            if val and f.target_id:
+                groups[str(val)].add(f.target_id)
+
+        return [
+            {"value": val, "targets": sorted(ids), "count": len(ids)}
+            for val, ids in groups.items()
+            if len(ids) > 1
+        ]
+
+    def risk_tiers(self, severity_field: str = "severity") -> dict[str, int]:
+        """Count targets by their highest severity finding.
+
+        Args:
+            severity_field: The field name to use for severity ordering.
+                            Must match the field on Finding.
+
+        Returns:
+            ``{\"critical\": 2, \"high\": 1, \"info\": 3}``
+        """
+        severity_order = {"critical": 4, "high": 3, "medium": 2,
+                          "low": 1, "info": 0}
         tiers: dict[str, str] = {}
 
         for f in self._findings:
             tid = f.target_id
-            severity = f.severity
-            priority = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-
-            if tid not in tiers or priority.get(severity, 0) > priority.get(tiers.get(tid, "info"), 0):
-                tiers[tid] = severity
+            sev = str(getattr(f, severity_field, "info"))
+            if tid not in tiers or severity_order.get(sev, 0) > severity_order.get(tiers[tid], 0):
+                tiers[tid] = sev
 
         result: dict[str, int] = Counter()
         for t in tiers.values():
@@ -132,19 +141,14 @@ class CorrelationEngine:
         return dict(result)
 
     def all_correlations(self) -> dict[str, Any]:
-        """Run all correlations and return a combined report."""
+        """Run all generic correlations and return a combined report."""
         return {
-            "vessel_count": self.vessel_count(),
-            "severity_summary": self.severity_summary(),
+            "unique_targets": self.unique_targets(),
+            "severity": self.count_by_severity(),
+            "finding_types": self.count_by_type(),
             "risk_tiers": self.risk_tiers(),
-            "finding_type_summary": self.finding_type_summary(),
-            "shared_attributes": {
-                "flag": self.shared_attributes("flag"),
-                "destination": self.shared_attributes("destination"),
-            },
-            "shared_management": self.shared_management(),
-            "shared_vsat": self.shared_vsat(),
-            "shadow_fleet_clusters": self.same_shadow_fleet_indicators(),
+            "shared_sources": self.group_by_field("source"),
+            "shared_target_types": self.group_by_field("target_type"),
         }
 
     def clear(self):

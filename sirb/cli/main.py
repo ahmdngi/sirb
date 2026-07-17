@@ -327,23 +327,13 @@ def _run(args) -> int:
 
     print(f"[sirb] starting swarm: {total} tasks, {args.max_workers} workers")
 
-    # Register default triggers on the blackboard
-    blackboard.register_trigger(
-        {"severity": "critical", "source": "shodan"},
-        "alert_aggregator",
-    )
-    blackboard.register_trigger(
-        {"finding_type": "shadow_fleet_flag"},
-        "alert_aggregator",
-    )
-    blackboard.register_trigger(
-        {"severity": "critical"},
-        "alert_aggregator",
-    )
-    blackboard.register_trigger(
-        {"finding_type": "shadow_fleet_flag"},
-        "log_summary",
-    )
+    # Register triggers from config (optional)
+    trigger_config = config.get("triggers", [])
+    for trigger in trigger_config:
+        predicate = trigger.get("predicate", {})
+        action = trigger.get("action", "")
+        if predicate and action:
+            blackboard.register_trigger(predicate, action)
 
     # Callback for checkpoint + triggers
     completed_before = 0
@@ -423,8 +413,8 @@ def _discover_workers(worker_config) -> WorkerRegistry:
     """Discover workers from config and package auto-discover.
 
     ``worker_config`` can be:
-    - A list of module names: ``["shipcrawler"]``
-    - A dict with nested config: ``{"shipcrawler": {"ports": ["tallinn"]}}``
+    - A list of module names: `["my-worker"]`
+    - A dict with nested config: `{"my-worker": {"option": "value"}}`
     - Empty (falls back to auto-discover)
     """
     registry = WorkerRegistry()

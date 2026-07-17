@@ -22,7 +22,7 @@ class Task:
     """A unit of work for a SirbWorker to execute."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    type: str = ""           # "vessel_osint" | "personnel_osint" | etc.
+    type: str = ""           # e.g. "scan", "recon", "monitor"
     worker: str = ""         # routes to SirbWorker.name
     params: dict = field(default_factory=dict)
     priority: int = 1        # 0 = highest
