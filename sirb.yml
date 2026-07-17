@@ -1,10 +1,9 @@
 # Sirb configuration
+# Workers are discovered from installed packages or local paths.
+# See https://github.com/ahmdngi/shipcrawler-worker
 
-workers:
-  shipcrawler:
-    ports:
-      - tallinn
-      # - helsinki        # uncomment to scan Helsinki too
+workers: []
+#  - shipcrawler_worker    # pip install git+https://github.com/ahmdngi/shipcrawler-worker.git
 
 max_workers: 10
 checkpoint_interval: 5
@@ -13,5 +12,10 @@ task_timeout: 300
 blackboard:
   decay_rate: 0.9
   trigger_check_interval: 60
+
+# Triggers call actions when a finding matches predicate fields.
+# triggers:
+#   - predicate: {severity: critical}
+#     action: alert
 
 output_dir: ~/hermes-vault/sirb-reports/

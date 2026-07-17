@@ -1,5 +1,10 @@
-"""Sirb workers package — drop your *._worker.py modules here."""
+"""Sirb worker packages — installable from external repos.
 
-from .base import SirbWorker
+Reference workers (ShipCrawler, etc.) live in their own repos,
+e.g. https://github.com/ahmdngi/shipcrawler-worker
 
-__all__ = ["SirbWorker"]
+Discover via ``sirb.yml``::
+
+    workers:
+      - shipcrawler_worker
+"""
