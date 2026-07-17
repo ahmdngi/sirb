@@ -1,6 +1,6 @@
 # Sirb (سرب)
 
-**v0.1.0** — Lightweight, zero-framework-dependency task orchestration engine.
+**v0.2.0** — Lightweight, zero-framework-dependency task orchestration engine.
 
 Manages N worker agents executing tasks concurrently from a thread-safe queue,
 routes them by type to registered workers, persists findings on a shared
@@ -66,7 +66,7 @@ sirb run
 | **Multi-Run Trends** | Persists assessment summaries per run. Compares latest run against previous — shows severity deltas, finding type changes, new targets. Output as markdown. |
 | **Trigger Predicates** | Register predicates on the blackboard. When a finding matches, an action fires (e.g., `alert_aggregator`). Predicates match on any finding field. |
 | **Assessment Markdown** | Structured report with unique targets, severity distribution, finding types, risk tiers, shared sources, top findings. |
-| **Live SSE Dashboard** | `sirb dashboard` starts an HTTP server at `localhost:8100` with a live SSE feed. Shows real-time task progress by polling checkpoint files. Dark-themed HTML UI. |
+| **Live Dashboard** | Full web UI at `:8502`. Three-panel layout: run history sidebar, live SSE stream + assessment viewer, launch controls + Leaflet vessel map. Supports 3 scan methods (Direct MMSI, Port Scan, Geo Location), Fast/Deep mode, Start/Stop controls. Zero deps beyond stdlib. |
 
 ### Agnosticism (guaranteed)
 | Commitment | Evidence |
@@ -109,7 +109,11 @@ sirb run
               │   CorrelationEngine    │──→ group_by_detail_key()
               │   Aggregator           │──→ render_markdown()
               │   Webhook POST         │──→ assessment JSON → URL
-              │   SSE Dashboard        │──→ live progress at :8100
+              │   Dashboard            │──→ full UI at :8100
+              │   (Run History)        │──→ past runs with timestamps
+              │   (Launch Panel)       │──→ MMSI / Port / Geo × Fast/Deep
+              │   (Vessel Map)         │──→ Leaflet OSM positions
+              │   (Stop Control)       │──→ kill running scans from browser
               └────────────────────────┘
 ```
 
@@ -132,9 +136,8 @@ sirb run --webhook URL          # POST assessment JSON on completion
 sirb run --max-failures 5       # Tolerate 5 consecutive failures per worker
 sirb list-workers               # Show all discovered workers
 sirb init                       # Scaffold a new worker skeleton
-sirb dashboard                  # Start live SSE dashboard (port 8100)
-sirb dashboard --port 9000      # Custom port
-sirb dashboard --run-id abc123  # Watch a specific previous run
+sirb dashboard                  # Start full web UI (port 8502)
+  --port PORT                   # Custom HTTP port
 ```
 
 ## Configuration
