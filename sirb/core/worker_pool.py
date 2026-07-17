@@ -1,0 +1,183 @@
+"""Worker pool — ThreadPoolExecutor wrapper with Sirb lifecycle."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
+
+from .models import Task, Result, TaskStatus
+from .task_queue import TaskQueue
+from .router import Router
+from .worker_base import SirbWorker
+
+
+class WorkerPool:
+    """Manages concurrent task execution against a ThreadPoolExecutor.
+
+    Workers claim tasks from the queue, route them to the correct
+    ``SirbWorker.execute()``, write results, and update task state.
+    """
+
+    def __init__(
+        self,
+        queue: TaskQueue,
+        router: Router,
+        max_workers: int = 10,
+        task_timeout: Optional[float] = None,
+        on_complete: Optional[Callable[[Task, Result], None]] = None,
+        throttle: Optional[dict[str, float]] = None,
+    ):
+        self._queue = queue
+        self._router = router
+        self._max_workers = max_workers
+        self._task_timeout = task_timeout
+        self._on_complete = on_complete
+        self._throttle = throttle or {}
+        self._last_call: dict[str, float] = {}
+
+    def run(self, timeout: Optional[float] = None) -> int:
+        """Claim and execute all available tasks.
+
+        Args:
+            timeout: Max seconds for the entire pool run. Each task still
+                has its own ``task_timeout`` per-task ceiling.
+
+        Returns:
+            Number of tasks completed.
+        """
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {}
+
+            while True:
+                # Submit more tasks until pool is full
+                while len(futures) < self._max_workers:
+                    task = self._queue.claim("pool")
+                    if task is None:
+                        break  # no more work
+
+                    worker = self._router.route(task)
+                    if worker is None:
+                        self._queue.fail(
+                            task.id,
+                            f"unknown worker '{task.worker}'",
+                            task.version,
+                        )
+                        continue
+
+                    if not self._queue.start(task.id, task.version):
+                        continue  # version mismatch, skip
+
+                    future = executor.submit(
+                        self._execute_wrapper, worker, task
+                    )
+                    futures[future] = task
+
+                if not futures:
+                    break  # no work and nothing running
+
+                # Wait for at least one to complete
+                done, _ = as_completed(
+                    futures,
+                    timeout=self._task_timeout if self._task_timeout else None,
+                )
+
+                for future in done:
+                    task = futures.pop(future)
+                    try:
+                        result = future.result(timeout=5)
+                        self._handle_result(task, result)
+                        if self._on_complete:
+                            self._on_complete(task, result)
+                        completed += 1
+                    except Exception as e:
+                        self._queue.fail(
+                            task.id,
+                            f"worker exception: {e}",
+                            task.version,
+                        )
+
+        return completed
+
+    async def run_async(self) -> int:
+        """Async wrapper around run() for use in asyncio contexts."""
+        return await asyncio.get_event_loop().run_in_executor(None, self.run)
+
+    # ── internal ────────────────────────────────────────────────────────
+
+    def _execute_wrapper(self, worker: SirbWorker, task: Task) -> Result:
+        """Execute a single task with throttle and timeout enforcement."""
+        # Throttle
+        self._enforce_throttle(worker)
+
+        try:
+            if self._task_timeout:
+                result = asyncio.run(
+                    asyncio.wait_for(
+                        worker.execute(task),
+                        timeout=self._task_timeout,
+                    )
+                )
+            else:
+                result = asyncio.run(worker.execute(task))
+
+            result.task_id = task.id
+            result.worker = worker.name
+            return result
+
+        except asyncio.TimeoutError:
+            return Result(
+                task_id=task.id,
+                worker=worker.name,
+                status="failure",
+                error=f"task exceeded {self._task_timeout}s timeout",
+            )
+        except Exception as e:
+            return Result(
+                task_id=task.id,
+                worker=worker.name,
+                status="failure",
+                error=str(e),
+            )
+
+    def _handle_result(self, task: Task, result: Result):
+        """Route a result back into the queue and blackboard."""
+        # Validate
+        worker = self._router.route(task)
+        if worker and hasattr(worker, "validate"):
+            try:
+                valid = asyncio.run(worker.validate(result))
+            except Exception:
+                valid = True
+            if not valid:
+                self._queue.fail(
+                    task.id, f"validation rejected: {result.error}", task.version
+                )
+                return
+
+        # Complete
+        if result.status in ("success", "partial"):
+            self._queue.complete(task.id, task.version)
+        else:
+            self._queue.fail(
+                task.id, result.error or "execution failed", task.version
+            )
+
+    def _enforce_throttle(self, worker: SirbWorker):
+        """Apply worker-declared rate limits."""
+        limits = worker.rate_limits()
+        now = time.time()
+
+        for resource, max_per_min in limits.items():
+            if max_per_min <= 0:
+                continue
+            min_interval = 60.0 / max_per_min
+            last = self._last_call.get(f"{worker.name}:{resource}", 0)
+            elapsed = now - last
+            if elapsed < min_interval:
+                sleep_time = min_interval - elapsed
+                time.sleep(sleep_time)
+            self._last_call[f"{worker.name}:{resource}"] = time.time()

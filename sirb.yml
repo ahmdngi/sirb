@@ -1,0 +1,14 @@
+# Sirb configuration
+
+workers:
+  - shipcrawler  # auto-discovered from sirb/workers/shipcrawler_worker.py
+
+max_workers: 10
+checkpoint_interval: 5
+task_timeout: 300
+
+blackboard:
+  decay_rate: 0.9
+  trigger_check_interval: 60
+
+output_dir: ~/hermes-vault/sirb-reports/

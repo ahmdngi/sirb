@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sirb"
+version = "0.1.0"
+description = "Sirb (سرب) — agnostic multi-agent task swarm"
+authors = [
+    {name = "Ahmed Nagi Nasr", email = "ahmed.nasr@taltech.ee"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+sirb = "sirb.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sirb*"]
