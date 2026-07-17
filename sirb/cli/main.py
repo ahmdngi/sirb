@@ -812,7 +812,7 @@ th { color: #8b949e; font-weight: 600; }
   <div class="top-bar">
     <h1>🐝 Sirb Swarm v0.1.0</h1>
     <span id="selected-run">No run selected</span>
-    <span id="sse-status">connecting...</span>
+    <span id="sse-status">connected</span>
   </div>
   <div class="content">
     <div class="panel" id="center-panel">
@@ -1094,6 +1094,12 @@ setInterval(loadRuns, 5000);
                                                "run_id": target})
                             self.wfile.write(f"data: {msg}\n\n".encode())
                             self.wfile.flush()
+                    else:
+                        # Keepalive when no runs exist — prevents
+                        # browser SSE timeout (Chrome drops idle
+                        # connections after ~30s)
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
                     time.sleep(2)
             except (BrokenPipeError, ConnectionResetError):
                 pass
