@@ -294,6 +294,19 @@ def _run(args) -> int:
     if not args.no_checkpoint:
         checkpointer.save_all(run_id, queue, blackboard)
 
+    # Generate assessment from blackboard
+    try:
+        from sirb.core import Aggregator
+        agg = Aggregator()
+        assessment = agg.assess(blackboard)
+        assessment_md = agg.render_markdown(assessment)
+        assessment_path = checkpointer._runs_dir / run_id / "assessment.md"
+        assessment_path.parent.mkdir(parents=True, exist_ok=True)
+        assessment_path.write_text(assessment_md)
+        print(f"       assessment: {assessment_path}")
+    except Exception as e:
+        print(f"       [sirb] WARN: assessment generation failed: {e}")
+
     # Summary
     status = queue.get_status()
     print(f"\n[sirb] run {run_id} complete")

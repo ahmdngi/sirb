@@ -6,6 +6,8 @@ from .router import Router
 from .worker_pool import WorkerPool
 from .persistence import Checkpointer
 from .blackboard import Blackboard
+from .correlation import CorrelationEngine
+from .aggregator import Aggregator
 
 __all__ = [
     "Task", "Result", "Finding", "TaskStatus",
@@ -16,4 +18,6 @@ __all__ = [
     "WorkerPool",
     "Checkpointer",
     "Blackboard",
+    "CorrelationEngine",
+    "Aggregator",
 ]
