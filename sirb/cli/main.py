@@ -51,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--cron", help="Cron schedule expression, e.g. '0 */6 * * *'")
     run_p.add_argument("--once", action="store_true",
                        help="Run once and exit (default behaviour)")
+    run_p.add_argument("--webhook", help="URL to POST assessment JSON to on completion")
+    run_p.add_argument("--max-failures", type=int, default=3,
+                       help="Max consecutive failures before a worker is paused (default: 3)")
 
     # list-workers
     sub.add_parser("list-workers", help="List all discovered workers")
@@ -378,6 +381,7 @@ def _run(args) -> int:
         task_timeout=args.task_timeout,
         on_complete=on_complete,
         throttle_pool=throttle_pool,
+        max_failures=args.max_failures,
     )
 
     pool.run()
@@ -399,6 +403,21 @@ def _run(args) -> int:
     except Exception as e:
         print(f"       [sirb] WARN: assessment generation failed: {e}")
 
+    # Webhook — POST assessment JSON if configured
+    webhook_url = args.webhook or config.get("webhook", "")
+    if webhook_url:
+        try:
+            import json as _json, urllib.request as _req
+            assessment_json = _json.dumps(assessment).encode()
+            _req.urlopen(_req.Request(
+                webhook_url, data=assessment_json,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ))
+            print(f"       webhook POSTED to {webhook_url}")
+        except Exception as e:
+            print(f"       [sirb] WARN: webhook failed: {e}")
+
     # Summary
     status = queue.get_status()
     print(f"\n[sirb] run {run_id} complete")
@@ -415,25 +434,22 @@ def _discover_workers(worker_config) -> WorkerRegistry:
     ``worker_config`` can be:
     - A list of module names: `["my-worker"]`
     - A dict with nested config: `{"my-worker": {"option": "value"}}`
-    - Empty (falls back to auto-discover)
+    - Empty (falls back to entry-point scan + auto-discover)
     """
     registry = WorkerRegistry()
 
-    # Auto-discover from sirb.workers package
+    # 1. Entry-point discovery — pip-installed SirbWorker packages
+    ep_count = registry.discover_entry_points()
+    if ep_count > 0:
+        print(f"[sirb] discovered {ep_count} worker(s) via entry points")
+
+    # 2. Auto-discover from sirb.workers package
     registry.discover_package("sirb.workers")
 
-    # Also scan the workers/ dir of the current project
-    cwd_workers = Path.cwd() / "workers"
-    if cwd_workers.is_dir():
-        registry._scan_directory(str(cwd_workers))
-
-    # Config-based worker initialisation
+    # 3. Config-based worker initialisation
     if isinstance(worker_config, list):
-        # Simple list — no per-worker config
         registry.discover(worker_config)
     elif isinstance(worker_config, dict):
-        # Dict with nested per-worker config
-        # Each value can be a dict (config) or None/other (no config)
         worker_modules = {}
         for key, val in worker_config.items():
             if isinstance(val, dict):
@@ -441,9 +457,6 @@ def _discover_workers(worker_config) -> WorkerRegistry:
             else:
                 worker_modules[key] = {}
         registry.discover(worker_modules)
-    else:
-        # Fallback — try package auto-discover only
-        pass
 
     return registry
 

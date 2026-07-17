@@ -1,4 +1,4 @@
-"""Thread-safe task queue with optimistic concurrency."""
+"""Thread-safe task queue with optimistic concurrency and deduplication."""
 
 from __future__ import annotations
 
@@ -12,32 +12,71 @@ from .models import Task, TaskStatus
 class TaskQueue:
     """Thread-safe ordered task queue.
 
-    Designed after the swarms (kyegomez) TaskQueue pattern:
     - Thread-safe dict of tasks protected by a ``threading.Lock``
     - Version-based optimistic concurrency on every state transition
     - Priority + FIFO ordering on claim()
     - Dependency tracking (task won't run until depends_on are COMPLETED)
     - Built-in retry with configurable max_retries
+    - Content-hash deduplication — same (worker + params) rejected
+      while the first is still PENDING/CLAIMED/RUNNING
     """
 
     def __init__(self):
         self._tasks: dict[str, Task] = {}
+        self._seen_hashes: dict[str, str] = {}  # content_hash → task_id
         self._lock = threading.Lock()
 
     # ── mutations ──────────────────────────────────────────────────────
 
-    def add(self, task: Task) -> str:
-        """Add a single task. Returns the task ID."""
+    def add(self, task: Task, dedup: bool = True) -> Optional[str]:
+        """Add a single task.
+
+        Args:
+            task: The task to add.
+            dedup: If True, reject if same (worker + params) already queued
+                   and still active (PENDING/CLAIMED/RUNNING).
+
+        Returns:
+            Task ID if added, None if rejected as duplicate.
+        """
         with self._lock:
+            if dedup:
+                h = task.content_hash()
+                existing = self._seen_hashes.get(h)
+                if existing:
+                    existing_task = self._tasks.get(existing)
+                    if existing_task and existing_task.status in (
+                        TaskStatus.PENDING, TaskStatus.CLAIMED, TaskStatus.RUNNING
+                    ):
+                        return None
+                    # Completed/Failed duplicates are fine (re-run)
+                    del self._seen_hashes[h]
+
             self._tasks[task.id] = task
+            if dedup:
+                self._seen_hashes[task.content_hash()] = task.id
         return task.id
 
-    def add_many(self, tasks: list[Task]) -> list[str]:
-        """Bulk-add tasks. Returns list of task IDs."""
+    def add_many(self, tasks: list[Task], dedup: bool = True) -> list[str]:
+        """Bulk-add tasks. Returns list of added task IDs (excludes dupes)."""
         ids = []
         with self._lock:
             for t in tasks:
+                if dedup:
+                    h = t.content_hash()
+                    existing = self._seen_hashes.get(h)
+                    if existing:
+                        existing_task = self._tasks.get(existing)
+                        if existing_task and existing_task.status in (
+                            TaskStatus.PENDING, TaskStatus.CLAIMED,
+                            TaskStatus.RUNNING,
+                        ):
+                            continue
+                        del self._seen_hashes[h]
+
                 self._tasks[t.id] = t
+                if dedup:
+                    self._seen_hashes[t.content_hash()] = t.id
                 ids.append(t.id)
         return ids
 
@@ -48,7 +87,7 @@ class TaskQueue:
         1. status == PENDING
         2. All depends_on task IDs are COMPLETED
 
-        Returns None if no tasks are available.
+        Returns a frozen copy of the claimed task, or None.
         """
         with self._lock:
             completed_ids = {
@@ -66,60 +105,60 @@ class TaskQueue:
             if not available:
                 return None
 
-            # Highest priority first, then oldest first (lower priority value = higher)
             available.sort(key=lambda t: (t.priority, t.created_at))
-
             chosen = available[0]
             chosen.status = TaskStatus.CLAIMED
             chosen.assigned_worker = worker_name
             chosen.version += 1
 
-            # Return a frozen copy so subsequent state transitions
-            # don't mutate the caller's version reference.
             return Task.from_dict(chosen.to_dict())
 
     def start(self, task_id: str, expected_version: int) -> bool:
         """Mark a claimed task as RUNNING. Returns False on version mismatch."""
         return self._transition(
             task_id, expected_version,
-            {TaskStatus.CLAIMED},
-            TaskStatus.RUNNING,
+            {TaskStatus.CLAIMED}, TaskStatus.RUNNING,
         )
 
     def complete(self, task_id: str, expected_version: int) -> bool:
-        """Mark a running task as COMPLETED."""
-        return self._transition(
-            task_id, expected_version,
-            {TaskStatus.RUNNING},
-            TaskStatus.COMPLETED,
-        )
-
-    def fail(self, task_id: str, error: str, expected_version: int) -> bool:
-        """Mark a running task as FAILED, or reset to PENDING if retries remain."""
+        """Mark a running task as COMPLETED. Removes seen hash on success."""
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None:
-                return False
-            if task.version != expected_version:
+            if task is None or task.version != expected_version:
                 return False
             if task.status != TaskStatus.RUNNING:
                 return False
+            task.status = TaskStatus.COMPLETED
+            task.version += 1
+            self._seen_hashes.pop(task.content_hash(), None)
+            return True
 
-            task.retries += 1
+    def fail(self, task_id: str, error: str, expected_version: int) -> bool:
+        """Fail a running task.
+
+        If retries remain: resets to PENDING.
+        If retries exhausted: marks FAILED and removes seen hash.
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.version != expected_version:
+                return False
+            if task.status != TaskStatus.RUNNING:
+                return False
             task.error = error
-
-            if task.retries <= task.max_retries:
+            if task.retries < task.max_retries:
+                task.retries += 1
                 task.status = TaskStatus.PENDING
                 task.assigned_worker = ""
+                task.version += 1
             else:
                 task.status = TaskStatus.FAILED
-                task.error = error
-
-            task.version += 1
+                task.version += 1
+                self._seen_hashes.pop(task.content_hash(), None)
             return True
 
     def cancel(self, task_id: str) -> bool:
-        """Cancel a task if not yet completed or already cancelled."""
+        """Cancel a task. Removes seen hash on success."""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
@@ -128,24 +167,29 @@ class TaskQueue:
                 return False
             task.status = TaskStatus.CANCELLED
             task.version += 1
+            self._seen_hashes.pop(task.content_hash(), None)
             return True
 
     def clear(self) -> int:
-        """Remove all tasks. Returns the count removed."""
+        """Remove all tasks and seen hashes. Returns the count removed."""
         with self._lock:
             count = len(self._tasks)
             self._tasks.clear()
+            self._seen_hashes.clear()
         return count
 
     def clear_non_terminal(self) -> int:
-        """Remove pending/claimed/running tasks, preserving completed/failed.
+        """Remove pending/claimed/running tasks, preserve terminal ones.
 
-        Returns the number of tasks removed.
+        Also cleans their seen hashes.
         """
         terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
         with self._lock:
-            to_remove = [tid for tid, t in self._tasks.items() if t.status not in terminal]
+            to_remove = [tid for tid, t in self._tasks.items()
+                         if t.status not in terminal]
             for tid in to_remove:
+                task = self._tasks[tid]
+                self._seen_hashes.pop(task.content_hash(), None)
                 del self._tasks[tid]
         return len(to_remove)
 
@@ -157,12 +201,7 @@ class TaskQueue:
             task = self._tasks.get(task_id)
             return task if task is None else Task.from_dict(task.to_dict())
 
-    def all(self) -> list[Task]:
-        """Get read-only copies of all tasks."""
-        with self._lock:
-            return [Task.from_dict(t.to_dict()) for t in self._tasks.values()]
-
-    def count(self, status: TaskStatus | None = None) -> int:
+    def count(self, status: Optional[TaskStatus] = None) -> int:
         """Count tasks, optionally filtered by status."""
         with self._lock:
             if status is None:
@@ -173,30 +212,31 @@ class TaskQueue:
         """Returns a snapshot of queue state for reporting."""
         with self._lock:
             counts = {}
-            total = 0
+            total = len(self._tasks)
             for t in self._tasks.values():
                 counts[t.status.value] = counts.get(t.status.value, 0) + 1
-                total += 1
-
             return {
                 "total": total,
                 "status_counts": counts,
                 "progress": f"{counts.get('completed', 0)}/{total}" if total else "0/0",
             }
 
+    # ── serialization ──────────────────────────────────────────────────
+
     def to_dict(self) -> dict:
         """Serialise entire queue for checkpoint."""
         with self._lock:
             return {
                 "tasks": {tid: t.to_dict() for tid, t in self._tasks.items()},
+                "seen_hashes": dict(self._seen_hashes),
             }
 
     @classmethod
     def from_dict(cls, d: dict) -> TaskQueue:
         """Deserialise a checkpointed queue."""
         q = cls()
-        for tid, tdata in d.get("tasks", {}).items():
-            q._tasks[tid] = Task.from_dict(tdata)
+        q._tasks = {tid: Task.from_dict(td) for tid, td in d.get("tasks", {}).items()}
+        q._seen_hashes = dict(d.get("seen_hashes", {}))
         return q
 
     # ── helpers ─────────────────────────────────────────────────────────

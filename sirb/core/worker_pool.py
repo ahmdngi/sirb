@@ -29,6 +29,7 @@ class WorkerPool:
         task_timeout: Optional[float] = None,
         on_complete: Optional[Callable[[Task, Result], None]] = None,
         throttle_pool: Optional[TokenBucketPool] = None,
+        max_failures: int = 3,
     ):
         self._queue = queue
         self._router = router
@@ -36,6 +37,8 @@ class WorkerPool:
         self._task_timeout = task_timeout
         self._on_complete = on_complete
         self._throttle = throttle_pool or TokenBucketPool()
+        self._max_failures = max_failures
+        self._consecutive_failures: dict[str, int] = {}
 
     def run(self, timeout: Optional[float] = None) -> int:
         """Claim and execute all available tasks.
@@ -80,12 +83,10 @@ class WorkerPool:
                     break  # no work and nothing running
 
                 # Wait for at least one to complete
-                done, _ = as_completed(
+                for future in as_completed(
                     futures,
                     timeout=self._task_timeout if self._task_timeout else None,
-                )
-
-                for future in done:
+                ):
                     task = futures.pop(future)
                     try:
                         result = future.result(timeout=5)
@@ -144,7 +145,19 @@ class WorkerPool:
             )
 
     def _handle_result(self, task: Task, result: Result):
-        """Route a result back into the queue and blackboard."""
+        """Route a result back into the queue and track failures."""
+        # Track consecutive failures per worker
+        worker_name = task.worker
+        if result.status == "failure":
+            self._consecutive_failures[worker_name] = \
+                self._consecutive_failures.get(worker_name, 0) + 1
+            if self._consecutive_failures[worker_name] >= self._max_failures:
+                print(f"[sirb] WARN: worker '{worker_name}' has "
+                      f"{self._consecutive_failures[worker_name]} consecutive "
+                      f"failures — pausing")
+        else:
+            self._consecutive_failures.pop(worker_name, None)
+
         # Validate
         worker = self._router.route(task)
         if worker and hasattr(worker, "validate"):

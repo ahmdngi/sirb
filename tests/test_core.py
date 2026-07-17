@@ -46,9 +46,12 @@ class TestTaskQueue:
 
     def test_priority_ordering(self):
         q = TaskQueue()
-        low = Task(type="test", worker="test", priority=2, id="low")
-        high = Task(type="test", worker="test", priority=0, id="high")
-        mid = Task(type="test", worker="test", priority=1, id="mid")
+        low = Task(type="test", worker="test", priority=2, id="low",
+                   params={"order": 2})
+        high = Task(type="test", worker="test", priority=0, id="high",
+                    params={"order": 0})
+        mid = Task(type="test", worker="test", priority=1, id="mid",
+                   params={"order": 1})
         q.add_many([low, high, mid])
 
         first = q.claim("w")
@@ -60,8 +63,9 @@ class TestTaskQueue:
 
     def test_dependency_blocking(self):
         q = TaskQueue()
-        dep = Task(type="dep", worker="w", id="dep")
-        blocked = Task(type="main", worker="w", id="main", depends_on=["dep"])
+        dep = Task(type="dep", worker="w", id="dep", params={"sub": "dep"})
+        blocked = Task(type="main", worker="w", id="main", depends_on=["dep"],
+                       params={"sub": "main"})
         q.add_many([blocked, dep])
 
         # Should get dep first, not blocked
@@ -106,8 +110,8 @@ class TestTaskQueue:
 
     def test_clear_non_terminal(self):
         q = TaskQueue()
-        t1 = Task(type="a", worker="w", id="t1")
-        t2 = Task(type="b", worker="w", id="t2")
+        t1 = Task(type="a", worker="w", id="t1", params={"sub": "a"})
+        t2 = Task(type="b", worker="w", id="t2", params={"sub": "b"})
         q.add_many([t1, t2])
 
         # Complete t1

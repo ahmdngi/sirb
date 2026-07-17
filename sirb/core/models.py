@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,6 +38,18 @@ class Task:
     assigned_worker: str = ""
     retries: int = 0
     error: str = ""
+
+    def content_hash(self) -> str:
+        """Stable hash identifying this task's content (worker + params).
+
+        Two tasks with the same worker and same params (key-order agnostic)
+        produce the same hash. Used for deduplication.
+        """
+        raw = json.dumps(
+            {"worker": self.worker, "params": self.params},
+            sort_keys=True, default=str,
+        )
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict:
         return {

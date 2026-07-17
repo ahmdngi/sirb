@@ -1,10 +1,9 @@
-"""Worker registry — config-file loading + auto-discover."""
+"""Worker registry — config-file loading + auto-discover + entry points."""
 
 from __future__ import annotations
 
 import importlib
 import inspect
-import pkgutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -19,11 +18,18 @@ class WorkerRegistry(dict[str, SirbWorker]):
     Behaves as a dict::
 
         worker = registry["my-worker"]
+
+    Discovery sources (checked in order):
+    1. ``discover()`` — explicit config list / per-worker config dict
+    2. ``discover_entry_points()`` — pip-installed packages with
+       ``sirb_workers`` entry point group
+    3. ``discover_package()`` — filesystem scan of a Python package
+    4. ``discover_filesystem()`` — scan a directory for ``*_worker.py``
     """
 
     def discover(self, config_workers: dict[str, dict] = None,
                  scan_paths: list[str] = None) -> int:
-        """Discover and register workers.
+        """Discover and register workers from config.
 
         Args:
             config_workers: Dict mapping worker module names to their config,
@@ -51,7 +57,7 @@ class WorkerRegistry(dict[str, SirbWorker]):
             elif isinstance(config_workers, dict):
                 worker_configs = config_workers
 
-        # 1. Explicit config imports
+        # Explicit config imports
         for module_path, cfg in worker_configs.items():
             try:
                 worker = self._import_worker(module_path, config=cfg)
@@ -61,15 +67,52 @@ class WorkerRegistry(dict[str, SirbWorker]):
             except Exception as e:
                 print(f"[sirb] WARN failed to load worker {module_path}: {e}")
 
-        # 2. Auto-discover from packages
-        if scan_paths:
-            for path in scan_paths:
-                count += self._scan_directory(path)
+        return count
+
+    def discover_entry_points(self) -> int:
+        """Discover workers registered via ``sirb_workers`` entry points.
+
+        Any pip-installed package can declare a worker by adding to its
+        ``pyproject.toml``::
+
+            [project.entry-points.sirb_workers]
+            my_worker = "my_worker_package"
+
+        Returns:
+            Number of workers registered.
+        """
+        count = 0
+        ep_group = "sirb_workers"
+
+        try:
+            from importlib.metadata import entry_points
+            eps = entry_points(group=ep_group)
+        except (ImportError, TypeError):
+            # Python <3.9 or alternative metadata backend
+            try:
+                from importlib_metadata import entry_points
+                eps = entry_points(group=ep_group)
+            except ImportError:
+                print(f"[sirb] WARN: entry_points not supported "
+                      f"(Python <3.9 and importlib_metadata not installed)")
+                return 0
+
+        for ep in eps:
+            try:
+                module_path = ep.value
+                worker = self._import_worker(module_path)
+                if worker:
+                    self[worker.name] = worker
+                    count += 1
+                    print(f"[sirb] discovered worker '{worker.name}' "
+                          f"from entry point '{ep.name}'")
+            except Exception as e:
+                print(f"[sirb] WARN entry point '{ep.name}': {e}")
 
         return count
 
-    def discover_package(self, package_name: str = "sirb.workers") -> int:
-        """Discover workers from an installed Python package."""
+    def discover_package(self, package_name: str) -> int:
+        """Discover workers in a Python package directory."""
         count = 0
         try:
             pkg = importlib.import_module(package_name)
@@ -90,7 +133,7 @@ class WorkerRegistry(dict[str, SirbWorker]):
         return count
 
     def list_workers(self) -> list[dict]:
-        """Return a list of worker metadata for display."""
+        """Return worker metadata for display."""
         return [
             {"name": w.name, "description": w.description, "cls": type(w).__name__}
             for w in self.values()
