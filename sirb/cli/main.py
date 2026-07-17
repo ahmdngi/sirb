@@ -304,8 +304,14 @@ def _run(args) -> int:
     return 0
 
 
-def _discover_workers(worker_names: list) -> WorkerRegistry:
-    """Discover workers from config and package auto-discover."""
+def _discover_workers(worker_config) -> WorkerRegistry:
+    """Discover workers from config and package auto-discover.
+
+    ``worker_config`` can be:
+    - A list of module names: ``["shipcrawler"]``
+    - A dict with nested config: ``{"shipcrawler": {"ports": ["tallinn"]}}``
+    - Empty (falls back to auto-discover)
+    """
     registry = WorkerRegistry()
 
     # Auto-discover from sirb.workers package
@@ -316,9 +322,23 @@ def _discover_workers(worker_names: list) -> WorkerRegistry:
     if cwd_workers.is_dir():
         registry._scan_directory(str(cwd_workers))
 
-    # Config-based imports
-    if worker_names:
-        registry.discover(worker_names)
+    # Config-based worker initialisation
+    if isinstance(worker_config, list):
+        # Simple list — no per-worker config
+        registry.discover(worker_config)
+    elif isinstance(worker_config, dict):
+        # Dict with nested per-worker config
+        # Each value can be a dict (config) or None/other (no config)
+        worker_modules = {}
+        for key, val in worker_config.items():
+            if isinstance(val, dict):
+                worker_modules[key] = val
+            else:
+                worker_modules[key] = {}
+        registry.discover(worker_modules)
+    else:
+        # Fallback — try package auto-discover only
+        pass
 
     return registry
 

@@ -21,13 +21,15 @@ class WorkerRegistry(dict[str, SirbWorker]):
         worker = registry["shipcrawler"]
     """
 
-    def discover(self, config_workers: list[str] = None,
+    def discover(self, config_workers: dict[str, dict] = None,
                  scan_paths: list[str] = None) -> int:
         """Discover and register workers.
 
         Args:
-            config_workers: List of fully-qualified module names from config,
-                e.g. ``["sirb.workers.shipcrawler_worker"]``.
+            config_workers: Dict mapping worker module names to their config,
+                e.g. ``{"shipcrawler": {"ports": ["tallinn"]}}``.
+                A bare list of strings is also accepted for backward
+                compatibility (workers without config).
             scan_paths: Additional filesystem paths to scan for workers.
                 Each path is scanned for ``*_worker.py`` files containing
                 ``SirbWorker`` subclasses.
@@ -37,16 +39,27 @@ class WorkerRegistry(dict[str, SirbWorker]):
         """
         count = 0
 
-        # 1. Explicit config imports
+        # Normalise config_workers to dict format
+        worker_configs: dict[str, dict] = {}
         if config_workers:
-            for module_path in config_workers:
-                try:
-                    worker = self._import_worker(module_path)
-                    if worker:
-                        self[worker.name] = worker
-                        count += 1
-                except Exception as e:
-                    print(f"[sirb] WARN failed to load worker {module_path}: {e}")
+            if isinstance(config_workers, list):
+                for item in config_workers:
+                    if isinstance(item, str):
+                        worker_configs[item] = {}
+                    elif isinstance(item, dict):
+                        worker_configs.update(item)
+            elif isinstance(config_workers, dict):
+                worker_configs = config_workers
+
+        # 1. Explicit config imports
+        for module_path, cfg in worker_configs.items():
+            try:
+                worker = self._import_worker(module_path, config=cfg)
+                if worker:
+                    self[worker.name] = worker
+                    count += 1
+            except Exception as e:
+                print(f"[sirb] WARN failed to load worker {module_path}: {e}")
 
         # 2. Auto-discover from packages
         if scan_paths:
@@ -85,12 +98,13 @@ class WorkerRegistry(dict[str, SirbWorker]):
 
     # ── internal ────────────────────────────────────────────────────────
 
-    def _import_worker(self, module_path: str) -> Optional[SirbWorker]:
+    def _import_worker(self, module_path: str,
+                       config: dict = None) -> Optional[SirbWorker]:
         module = importlib.import_module(module_path)
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if (issubclass(obj, SirbWorker) and obj is not SirbWorker
                     and hasattr(obj, "name") and obj.name):
-                return obj()
+                return obj(config=config or {})
         return None
 
     def _scan_directory(self, dir_path: str) -> int:

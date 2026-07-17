@@ -1,7 +1,10 @@
 # Sirb configuration
 
 workers:
-  - shipcrawler  # auto-discovered from sirb/workers/shipcrawler_worker.py
+  shipcrawler:
+    ports:
+      - tallinn
+      # - helsinki        # uncomment to scan Helsinki too
 
 max_workers: 10
 checkpoint_interval: 5

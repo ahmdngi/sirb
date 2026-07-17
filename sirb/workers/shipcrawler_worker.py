@@ -230,11 +230,10 @@ class ShipCrawlerWorker(SirbWorker):
     async def discover(self) -> list[Task]:
         """Discover vessels from configured sources.
 
-        Currently supports:
-        - A static JSON file at ``$SIRB_WORKER_DATA/vessels.json``
-        - Port geofence configs in ``sirb.yml`` under ``workers.shipcrawler.ports``
-
-        Future: live AIS port geofence via VesselFinder/MarineTraffic.
+        Sources (checked in order):
+        1. ``$SIRB_WORKER_DATA/vessels.json`` — static vessel list
+        2. Config ``workers.shipcrawler.ports`` — live AIS port scans
+           via VesselFinder port pages.
         """
         tasks = []
 
@@ -260,9 +259,36 @@ class ShipCrawlerWorker(SirbWorker):
             except Exception as e:
                 print(f"[shipcrawler] WARN: failed to read {vessels_file}: {e}")
 
-        # 2. Port configs — placeholder for AIS geofence
-        #    Future: query VesselFinder for vessels in each port's
-        #    bounding box, resolve MMSIs, create tasks.
+        # 2. Live AIS port scan
+        if self._port_config:
+            from sirb.discovery import PortConfig, PortScanner
+
+            port_cfg = PortConfig(self._port_config)
+            for key in self._port_config.keys():
+                port_def = port_cfg.get(key)
+                if not port_def:
+                    print(f"[shipcrawler] WARN: unknown port '{key}' in config")
+                    continue
+
+                print(f"[shipcrawler] Scanning {port_def.name}...")
+                scanner = PortScanner(port_def)
+                vessels = await scanner.scan()
+                print(f"[shipcrawler]   found {len(vessels)} vessels in "
+                      f"{port_def.name}")
+
+                for v in vessels:
+                    mmsi = v.get("mmsi", "")
+                    if mmsi:
+                        tasks.append(Task(
+                            type="vessel_osint",
+                            worker=self.name,
+                            params={
+                                "mmsi": mmsi,
+                                "name": v.get("name", ""),
+                                "port": key,
+                            },
+                            priority=0,  # live vessels = highest priority
+                        ))
 
         return tasks
 
