@@ -581,6 +581,8 @@ def _dashboard(args):
                 self._serve_sse()
             elif path == "/health":
                 self._send_json({"status": "ok", "time": time.time()})
+            elif path == "/logo":
+                self._serve_logo()
             elif path == "/runs":
                 self._send_json(_list_runs())
             elif path.startswith("/run/") and path.endswith("/json"):
@@ -754,6 +756,20 @@ def _dashboard(args):
             self.end_headers()
             self.wfile.write(html.encode())
 
+        _LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo.png")
+
+        def _serve_logo(self):
+            try:
+                with open(self._LOGO_PATH, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+            except FileNotFoundError:
+                self._send_json({"error": "logo not found"}, 404)
+
         # ── main HTML page ────────────────────────────────────────────
 
         def _serve_html(self):
@@ -776,7 +792,8 @@ body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; 
 .sidebar .run-item .date { font-size: 0.75em; color: #8b949e; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .main .top-bar { padding: 1em; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 1em; }
-.top-bar h1 { font-size: 1.2em; color: #58a6ff; }
+.top-bar h1 { font-size: 1.2em; color: #58a6ff; display:flex; align-items:center; gap:8px; }
+.top-bar .brand-logo { height:28px; width:auto; }
 .top-bar #sse-status { font-size: 0.8em; color: #8b949e; margin-left: auto; }
 .content { flex: 1; display: flex; overflow: hidden; }
 .panel { flex: 1; padding: 1em; overflow-y: auto; min-width: 0; }
@@ -810,7 +827,7 @@ th { color: #8b949e; font-weight: 600; }
 </div>
 <div class="main">
   <div class="top-bar">
-    <h1>🐝 Sirb Swarm v0.1.0</h1>
+    <h1><img src="/logo" class="brand-logo" alt="Sirb"> Sirb Swarm</h1>
     <span id="selected-run">No run selected</span>
     <span id="sse-status">connected</span>
   </div>
