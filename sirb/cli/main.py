@@ -664,7 +664,6 @@ def _dashboard(args):
                 if not lat or not lon:
                     self._send_json({"error": "lat and lon required"}, 400)
                     return
-                # Write temp config with geo_targets
                 import tempfile
                 tf = tempfile.NamedTemporaryFile(
                     mode="w", suffix=".json", delete=False, prefix="sirb-geo-")
@@ -692,6 +691,47 @@ def _dashboard(args):
                     self._send_json({"run_id": run_id, "status": "started"})
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
+
+            elif path == "/run/port":
+                port_key = params.get("port", [""])[0].strip()
+                if not port_key:
+                    self._send_json({"error": "port required"}, 400)
+                    return
+                # Look up port definition from PortConfig
+                try:
+                    from shipcrawler_worker.discovery import PortConfig
+                    pc = PortConfig()
+                    pd = pc.get(port_key)
+                    if not pd:
+                        self._send_json({"error": f"Unknown port: {port_key}"}, 400)
+                        return
+                    # Spawn run with port config in environment
+                    port_cfg = {port_key: {"vessel_finder_url": pd.vessel_finder_url,
+                                            "lat_min": pd.lat_min, "lat_max": pd.lat_max,
+                                            "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                    hermes_python = sys.executable
+                    env = os.environ.copy()
+                    env["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
+                    args_list = [hermes_python, "-m", "sirb", "run"]
+                    proc = subprocess.Popen(
+                        args_list, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, env=env,
+                    )
+                    run_id = f"port-{port_key}-{int(time.time())}"
+                    with proc_lock:
+                        running_procs[run_id] = proc
+                    threading.Thread(
+                        target=lambda pid, p: [p.stdout.read()] or
+                        running_procs.pop(pid, None),
+                        args=(run_id, proc), daemon=True,
+                    ).start()
+                    self._send_json({"run_id": run_id, "status": "started",
+                                     "port": port_key})
+                except ImportError:
+                    self._send_json({"error": "shipcrawler_worker not installed"}, 400)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+
             else:
                 self._send_json({"error": "not found"}, 404)
 
@@ -777,10 +817,55 @@ th { color: #8b949e; font-weight: 600; }
     </div>
     <div class="panel-right" id="right-panel">
       <h3 style="color:#58a6ff;margin-bottom:0.5em;">Launch Scan</h3>
+
       <div class="form-group">
-        <label>MMSI(s) — space or comma separated</label>
-        <input id="mmsi-input" placeholder="273342890 311000987" />
+        <label>Method</label>
+        <select id="method-select" onchange="toggleMethod()">
+          <option value="mmsi">Direct MMSI</option>
+          <option value="port">Port Scan</option>
+          <option value="geo">Geo Location</option>
+        </select>
       </div>
+
+      <!-- Direct MMSI -->
+      <div id="method-mmsi" class="method-panel">
+        <div class="form-group">
+          <label>MMSI(s) — space or comma separated</label>
+          <input id="mmsi-input" placeholder="273342890 311000987" />
+        </div>
+      </div>
+
+      <!-- Port Scan -->
+      <div id="method-port" class="method-panel" style="display:none">
+        <div class="form-group">
+          <label>Port</label>
+          <select id="port-select">
+            <option value="tallinn">Tallinn</option>
+            <option value="helsinki">Helsinki</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Geo Location -->
+      <div id="method-geo" class="method-panel" style="display:none">
+        <div class="form-group">
+          <label>Latitude</label>
+          <input id="geo-lat" placeholder="59.5" />
+        </div>
+        <div class="form-group">
+          <label>Longitude</label>
+          <input id="geo-lon" placeholder="24.5" />
+        </div>
+        <div class="form-group">
+          <label>Radius (km)</label>
+          <input id="geo-radius" placeholder="50" value="50" />
+        </div>
+        <div class="form-group">
+          <label>Label (optional)</label>
+          <input id="geo-label" placeholder="Tallinn Bay" />
+        </div>
+      </div>
+
       <div class="form-group">
         <label>Mode</label>
         <select id="mode-select">
@@ -790,25 +875,6 @@ th { color: #8b949e; font-weight: 600; }
       </div>
       <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
       <button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button>
-      <hr style="border-color:#30363d;margin:1em 0;" />
-      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Geo Location Scan</h3>
-      <div class="form-group">
-        <label>Latitude</label>
-        <input id="geo-lat" placeholder="59.5" />
-      </div>
-      <div class="form-group">
-        <label>Longitude</label>
-        <input id="geo-lon" placeholder="24.5" />
-      </div>
-      <div class="form-group">
-        <label>Radius (km)</label>
-        <input id="geo-radius" placeholder="50" value="50" />
-      </div>
-      <div class="form-group">
-        <label>Label (optional)</label>
-        <input id="geo-label" placeholder="Tallinn Bay" />
-      </div>
-      <button class="btn btn-primary" id="geo-btn" onclick="launchGeo()">▶ Scan Area</button>
       <hr style="border-color:#30363d;margin:1em 0;" />
       <h3 style="color:#58a6ff;margin-bottom:0.5em;">Vessel Positions</h3>
       <div id="map"></div>
@@ -911,29 +977,67 @@ async function loadPositions(rid) {
 }
 
 async function launchRun() {
-  const mmsi = document.getElementById("mmsi-input").value.trim();
-  const mode = document.getElementById("mode-select").value;
-  if (!mmsi) { alert("Enter at least one MMSI"); return; }
-  document.getElementById("run-btn").disabled = true;
-  document.getElementById("run-btn").textContent = "Running...";
-  document.getElementById("stop-btn").style.display = "inline-block";
-  try {
+  const method = document.getElementById("method-select").value;
+
+  if (method === "mmsi") {
+    const mmsi = document.getElementById("mmsi-input").value.trim();
+    const mode = document.getElementById("mode-select").value;
+    if (!mmsi) { alert("Enter at least one MMSI"); return; }
     const r = await fetch("/run/new", {
       method: "POST",
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: "mmsi=" + encodeURIComponent(mmsi) + "&mode=" + encodeURIComponent(mode),
     });
+    handleLaunchResponse(r);
+  }
+  else if (method === "port") {
+    const port = document.getElementById("port-select").value;
+    const mode = document.getElementById("mode-select").value;
+    const r = await fetch("/run/port", {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: "port=" + encodeURIComponent(port) + "&mode=" + encodeURIComponent(mode),
+    });
+    handleLaunchResponse(r);
+  }
+  else if (method === "geo") {
+    const lat = document.getElementById("geo-lat").value.trim();
+    const lon = document.getElementById("geo-lon").value.trim();
+    const radius = document.getElementById("geo-radius").value.trim() || "50";
+    const label = document.getElementById("geo-label").value.trim() || (lat + "," + lon);
+    if (!lat || !lon) { alert("Enter latitude and longitude"); return; }
+    const r = await fetch("/run/geo", {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
+          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label),
+    });
+    handleLaunchResponse(r);
+  }
+}
+
+async function handleLaunchResponse(responsePromise) {
+  document.getElementById("run-btn").disabled = true;
+  document.getElementById("run-btn").textContent = "Running...";
+  document.getElementById("stop-btn").style.display = "inline-block";
+  try {
+    const r = await responsePromise;
     const d = await r.json();
     if (d.run_id) {
       currentRunId = d.run_id;
       document.getElementById("selected-run").textContent = "Running: " + d.run_id;
       document.getElementById("assessment-view").textContent = "Run launched. Waiting for checkpoint data...";
-    } else if (d.error) {
-      alert("Error: " + d.error);
-    }
+    } else if (d.error) { alert("Error: " + d.error); }
   } catch(e) { alert("Failed: " + e); }
   document.getElementById("run-btn").disabled = false;
   document.getElementById("run-btn").textContent = "▶ Run";
+}
+
+function toggleMethod() {
+  const m = document.getElementById("method-select").value;
+  document.getElementById("method-mmsi").style.display = m === "mmsi" ? "" : "none";
+  document.getElementById("method-port").style.display = m === "port" ? "" : "none";
+  document.getElementById("method-geo").style.display = m === "geo" ? "" : "none";
 }
 
 async function stopRun() {
@@ -942,32 +1046,6 @@ async function stopRun() {
   document.getElementById("stop-btn").style.display = "none";
   document.getElementById("selected-run").textContent = "Stopped: " + currentRunId;
   setTimeout(loadRuns, 1000);
-}
-
-async function launchGeo() {
-  const lat = document.getElementById("geo-lat").value.trim();
-  const lon = document.getElementById("geo-lon").value.trim();
-  const radius = document.getElementById("geo-radius").value.trim() || "50";
-  const label = document.getElementById("geo-label").value.trim() || (lat + "," + lon);
-  if (!lat || !lon) { alert("Enter latitude and longitude"); return; }
-  document.getElementById("geo-btn").disabled = true;
-  document.getElementById("geo-btn").textContent = "Scanning...";
-  try {
-    const r = await fetch("/run/geo", {
-      method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
-          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label),
-    });
-    const d = await r.json();
-    if (d.run_id) {
-      currentRunId = d.run_id;
-      document.getElementById("selected-run").textContent = "Geo scan: " + d.run_id;
-      document.getElementById("assessment-view").textContent = "Geo scan launched. Waiting for discovery...";
-    } else if (d.error) { alert("Error: " + d.error); }
-  } catch(e) { alert("Failed: " + e); }
-  document.getElementById("geo-btn").disabled = false;
-  document.getElementById("geo-btn").textContent = "▶ Scan Area";
 }
 
 // Init
