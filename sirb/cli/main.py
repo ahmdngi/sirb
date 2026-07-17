@@ -1070,7 +1070,11 @@ setInterval(loadRuns, 5000);
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            # Immediately send current run status on connect
+            # Always send a heartbeat so the browser fires onopen
+            self.wfile.write(b"event: connected\ndata: {}\n\n")
+            self.wfile.flush()
+
+            # Immediately send current run status if available
             target = run_id_filter or self._latest_run_id()
             if target:
                 status = self._read_run_status(target)
