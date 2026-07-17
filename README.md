@@ -1,5 +1,9 @@
 # Sirb (سرب)
 
+<p align="center">
+  <img src="sirb/cli/logo.png" alt="Sirb Logo" width="300">
+</p>
+
 **v0.2.0** — Lightweight, zero-framework-dependency task orchestration engine.
 
 Manages N worker agents executing tasks concurrently from a thread-safe queue,
