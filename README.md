@@ -10,6 +10,14 @@ blackboard with pheromone decay, and checkpoints state to disk for crash recover
 > Workers (`SirbWorker` subclasses) bring domain logic — ShipCrawler, personnel
 > OSINT, port authority scrapers — each in their own installable package.
 
+## Related Skills
+
+| Skill | Description |
+|-------|-------------|
+| [**shipcrawler-worker**](https://github.com/ahmdngi/shipcrawler-worker) | Vessel OSINT worker — wraps the shipcrawler-parallel pipeline as a SirbWorker |
+| [**shipcrawler**](https://github.com/ahmdngi/shipcrawler-v4) | Agent-driven sequential ShipCrawler (~10 min). Deeper than the parallel pipeline. |
+| [**shipcrawler-parallel**](https://github.com/ahmdngi/shipcrawler-parallel) | Fast parallel pipeline (~2 min). Used by shipcrawler-worker internally. |
+
 ## Quick Start
 
 ```bash
