@@ -8,6 +8,7 @@ from .persistence import Checkpointer
 from .blackboard import Blackboard
 from .correlation import CorrelationEngine
 from .aggregator import Aggregator
+from .throttle import TokenBucket, TokenBucketPool
 
 __all__ = [
     "Task", "Result", "Finding", "TaskStatus",
@@ -20,4 +21,5 @@ __all__ = [
     "Blackboard",
     "CorrelationEngine",
     "Aggregator",
+    "TokenBucket", "TokenBucketPool",
 ]

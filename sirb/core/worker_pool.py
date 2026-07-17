@@ -11,6 +11,7 @@ from .models import Task, Result, TaskStatus
 from .task_queue import TaskQueue
 from .router import Router
 from .worker_base import SirbWorker
+from .throttle import TokenBucketPool
 
 
 class WorkerPool:
@@ -27,15 +28,14 @@ class WorkerPool:
         max_workers: int = 10,
         task_timeout: Optional[float] = None,
         on_complete: Optional[Callable[[Task, Result], None]] = None,
-        throttle: Optional[dict[str, float]] = None,
+        throttle_pool: Optional[TokenBucketPool] = None,
     ):
         self._queue = queue
         self._router = router
         self._max_workers = max_workers
         self._task_timeout = task_timeout
         self._on_complete = on_complete
-        self._throttle = throttle or {}
-        self._last_call: dict[str, float] = {}
+        self._throttle = throttle_pool or TokenBucketPool()
 
     def run(self, timeout: Optional[float] = None) -> int:
         """Claim and execute all available tasks.
@@ -167,17 +167,7 @@ class WorkerPool:
             )
 
     def _enforce_throttle(self, worker: SirbWorker):
-        """Apply worker-declared rate limits."""
+        """Apply token bucket rate limits for this worker."""
         limits = worker.rate_limits()
-        now = time.time()
-
-        for resource, max_per_min in limits.items():
-            if max_per_min <= 0:
-                continue
-            min_interval = 60.0 / max_per_min
-            last = self._last_call.get(f"{worker.name}:{resource}", 0)
-            elapsed = now - last
-            if elapsed < min_interval:
-                sleep_time = min_interval - elapsed
-                time.sleep(sleep_time)
-            self._last_call[f"{worker.name}:{resource}"] = time.time()
+        for resource in limits:
+            self._throttle.acquire(worker.name, resource, block=True)

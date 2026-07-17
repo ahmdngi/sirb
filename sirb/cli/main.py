@@ -12,7 +12,7 @@ from pathlib import Path
 
 from sirb.core import (
     Task, Finding, TaskQueue, WorkerRegistry, Router,
-    WorkerPool, Checkpointer, Blackboard,
+    WorkerPool, Checkpointer, Blackboard, TokenBucketPool,
 )
 from sirb.core.worker_base import SirbWorker
 
@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--no-checkpoint", action="store_true",
                        help="Disable checkpointing")
     run_p.add_argument("--resume", help="Resume a previous run by run_id")
+    run_p.add_argument("--cron", help="Cron schedule expression, e.g. '0 */6 * * *'")
+    run_p.add_argument("--once", action="store_true",
+                       help="Run once and exit (default behaviour)")
 
     # list-workers
     sub.add_parser("list-workers", help="List all discovered workers")
@@ -193,9 +196,76 @@ class {name.title().replace("_", "")}Worker(SirbWorker):
     return 0
 
 
+def _install_cron(args, config: dict) -> int:
+    """Install a cron job for periodic Sirb runs."""
+    import shlex
+
+    # Build the command that cron will run
+    cmd_parts = [sys.executable, "-m", "sirb.cli.main", "run"]
+    if args.config:
+        cmd_parts.extend(["-c", args.config])
+    if args.workers:
+        cmd_parts.extend(["--workers"] + args.workers)
+    if args.max_workers:
+        cmd_parts.extend(["--max-workers", str(args.max_workers)])
+    if args.task_timeout:
+        cmd_parts.extend(["--task-timeout", str(args.task_timeout)])
+    if args.no_checkpoint:
+        cmd_parts.append("--no-checkpoint")
+    if args.tasks:
+        cmd_parts.extend(["--tasks", args.tasks])
+
+    cmd_str = shlex.join(cmd_parts)
+
+    cron_line = f"{args.cron} cd {shlex.quote(os.getcwd())} && {cmd_str} >> ~/hermes-vault/sirb-reports/cron.log 2>&1"
+
+    # Try to install via crontab
+    try:
+        import subprocess
+        existing = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True, text=True,
+        )
+        existing_cron = existing.stdout if existing.returncode == 0 else ""
+
+        # Check if a sirb cron already exists
+        if "sirb.cli.main" in existing_cron:
+            print("[sirb] WARN: a Sirb cron job already exists in crontab")
+            print("       Remove it manually with `crontab -e` first.")
+            # Still append? No — avoid duplicates
+            return 1
+
+        new_cron = existing_cron.strip() + "\n" + cron_line + "\n"
+        proc = subprocess.run(
+            ["crontab"],
+            input=new_cron, text=True, capture_output=True,
+        )
+        if proc.returncode == 0:
+            print(f"[sirb] cron job installed: {args.cron}")
+            print(f"       {cmd_str}")
+            print(f"       Log: ~/hermes-vault/sirb-reports/cron.log")
+            return 0
+        else:
+            print(f"[sirb] ERROR: failed to install cron: {proc.stderr}")
+            return 1
+
+    except FileNotFoundError:
+        print("[sirb] ERROR: `crontab` not found on this system")
+        print("       Install cron or add this line manually:")
+        print()
+        print(f"  {cron_line}")
+        return 1
+
+
 def _run(args) -> int:
     config = _load_config(args.config)
     run_dir = os.path.expanduser(args.run_dir)
+
+    # ── Cron mode: install scheduled job ────────────────────────────────
+    if args.cron:
+        return _install_cron(args, config)
+
+    # ── Resolve config and run directory ────────────────────────────
 
     # Discover workers
     worker_names = args.workers or config.get("workers", [])
@@ -305,13 +375,19 @@ def _run(args) -> int:
             f"[{status['progress']}]"
         )
 
-    # Run pool
+    # Run pool with token bucket rate limiting
+    throttle_pool = TokenBucketPool()
+    for worker_name, worker in registry.items():
+        limits = worker.rate_limits()
+        throttle_pool.register_worker(worker_name, limits)
+
     pool = WorkerPool(
         queue=queue,
         router=router,
         max_workers=args.max_workers,
         task_timeout=args.task_timeout,
         on_complete=on_complete,
+        throttle_pool=throttle_pool,
     )
 
     pool.run()
