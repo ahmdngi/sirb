@@ -14,6 +14,11 @@ blackboard with pheromone decay, and checkpoints state to disk for crash recover
 > Workers (`SirbWorker` subclasses) bring domain logic — ShipCrawler, personnel
 > OSINT, port authority scrapers — each in their own installable package.
 
+[![GitHub Release](https://img.shields.io/github/v/release/ahmdngi/sirb?style=flat-square)](https://github.com/ahmdngi/sirb/releases)
+[![License](https://img.shields.io/badge/license-MIT-yellow?style=flat-square)]()
+[![Language](https://img.shields.io/badge/language-Python-blue?style=flat-square)]()
+[![Stars](https://img.shields.io/github/stars/ahmdngi/sirb?style=flat-square)](https://github.com/ahmdngi/sirb)
+
 ## Related Skills
 
 | Skill | Description |
