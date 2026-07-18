@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <rect width="120" height="120" rx="20" fill="#0D0D0F"/>
+  <!-- Central node -->
+  <circle cx="60" cy="60" r="8" stroke="#F39C12" stroke-width="2.5" fill="#F39C12" fill-opacity="0.2"/>
+  <!-- Orbit ring -->
+  <circle cx="60" cy="60" r="28" stroke="#F39C12" stroke-width="1.5" stroke-dasharray="4 4" fill="none" opacity="0.4"/>
+  <circle cx="60" cy="60" r="40" stroke="#F39C12" stroke-width="1" stroke-dasharray="3 6" fill="none" opacity="0.2"/>
+  <!-- Worker nodes (swarm dots) -->
+  <circle cx="60" cy="32" r="4" fill="#F39C12"/>
+  <circle cx="88" cy="60" r="4" fill="#F39C12"/>
+  <circle cx="60" cy="88" r="4" fill="#F39C12"/>
+  <circle cx="32" cy="60" r="4" fill="#F39C12"/>
+  <!-- Mid-orbit workers -->
+  <circle cx="75" cy="45" r="3" fill="#F39C12" opacity="0.7"/>
+  <circle cx="45" cy="75" r="3" fill="#F39C12" opacity="0.7"/>
+  <circle cx="75" cy="75" r="3" fill="#F39C12" opacity="0.7"/>
+  <circle cx="45" cy="45" r="3" fill="#F39C12" opacity="0.7"/>
+  <!-- Outer workers -->
+  <circle cx="97" cy="38" r="2.5" fill="#F39C12" opacity="0.4"/>
+  <circle cx="97" cy="82" r="2.5" fill="#F39C12" opacity="0.4"/>
+  <circle cx="23" cy="38" r="2.5" fill="#F39C12" opacity="0.4"/>
+  <circle cx="23" cy="82" r="2.5" fill="#F39C12" opacity="0.4"/>
+  <!-- Orbital trail (bee flight path) -->
+  <path d="M60 32 A28 28 0 0 1 88 60" stroke="#F39C12" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.3"/>
+  <path d="M88 60 A28 28 0 0 1 60 88" stroke="#F39C12" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.2"/>
+</svg>
