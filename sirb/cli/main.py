@@ -1060,6 +1060,7 @@ def _dashboard(args):
                     def _launch_agent(target):
                         agent_dir = runs_base / rid / "vessels" / target
                         agent_dir.mkdir(parents=True, exist_ok=True)
+                        log_path = vessels_path / f"{target}.log"
                         prompt = (
                             f"Using the shipcrawler OSINT framework, research the vessel {target}. "
                             f"Execute ALL phases: Equasis identity, AIS tracking, "
@@ -1078,10 +1079,23 @@ def _dashboard(args):
                             cmd.extend(["--profile", prof])
                         if mod:
                             cmd.extend(["--model", mod])
-                        return subprocess.Popen(
+                        proc = subprocess.Popen(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, env=env,
                         )
+                        # Reader thread: writes stdout to log file line by line
+                        def _reader(p, lp):
+                            try:
+                                with open(lp, "w") as f:
+                                    for line in p.stdout:
+                                        f.write(line)
+                                        f.flush()
+                            except Exception:
+                                pass
+                        import threading as _th
+                        t = _th.Thread(target=_reader, args=(proc, log_path), daemon=True)
+                        t.start()
+                        return proc
 
                     # ── Parallel agent launch ──
                     procs = {}
@@ -1104,10 +1118,8 @@ def _dashboard(args):
                                 continue
                             ret = p.poll()
                             if ret is not None:
-                                # Agent finished
-                                output, _ = p.communicate()
+                                # Agent finished — log already written by reader thread
                                 status = "done" if ret == 0 else "failed"
-                                (vessels_path / f"{t}.log").write_text(output or "")
                                 agents[t] = {"target": t, "status": status, "exit_code": ret}
                                 del procs[t]
                                 # Update tracking immediately
@@ -1124,8 +1136,6 @@ def _dashboard(args):
                     for t, p in procs.items():
                         if p and p.poll() is None:
                             p.kill()
-                            output, _ = p.communicate()
-                            (vessels_path / f"{t}.log").write_text(output or "")
                             agents[t] = {"target": t, "status": "timeout", "exit_code": -1}
 
                     # Generate connections analysis
