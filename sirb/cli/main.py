@@ -735,7 +735,7 @@ def _dashboard(args):
                                                 "mode": mode}]}))
                 tf.close()
                 hermes_python = sys.executable
-                args_list = [hermes_python, "-m", "sirb", "run",
+                args_list = ["sirb", "run",
                              "--tasks", tf.name]
                 env = os.environ.copy()
                 env["SIRB_RUN_DIR"] = str(runs_base.parent)
@@ -793,14 +793,13 @@ def _dashboard(args):
                             "radius_km": float(radius), "label": label}]
                 tf.write(json.dumps(geo_cfg))
                 tf.close()
-                hermes_python = sys.executable
                 env = os.environ.copy()
                 env["SIRB_GEO_TARGETS"] = json.dumps(geo_cfg)
                 if profile and profile not in ("", "default"):
                     env["SIRB_HERMES_PROFILE"] = profile
                 if model:
                     env["SIRB_HERMES_MODEL"] = model
-                args_list = [hermes_python, "-m", "sirb", "run"]
+                args_list = ["sirb", "run"]
                 try:
                     proc = subprocess.Popen(
                         args_list, stdout=subprocess.PIPE,
@@ -844,7 +843,7 @@ def _dashboard(args):
                         env["SIRB_HERMES_PROFILE"] = profile
                     if model:
                         env["SIRB_HERMES_MODEL"] = model
-                    args_list = [hermes_python, "-m", "sirb", "run"]
+                    args_list = ["sirb", "run"]
                     proc = subprocess.Popen(
                         args_list, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, text=True, env=env,
