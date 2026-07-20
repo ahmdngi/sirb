@@ -1136,35 +1136,22 @@ loadRuns();loadProfileModels("");setInterval(loadRuns,5000);
             d = _get_runs_dir(args)
             if not d.exists():
                 return None
-            for r in sorted(d.iterdir(), reverse=True):
-                if r.is_dir() and (r / "task_queue.json").exists():
+            for r in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if r.is_dir() and ((r / "tracking.json").exists() or (r / "task_queue.json").exists()):
                     return r.name
             return None
 
         def _read_run_status(self, rid):
             d = _get_runs_dir(args)
-            qp = d / rid / "task_queue.json"
-            if not qp.exists():
-                return None
-            try:
-                data = json.loads(qp.read_text())
-                tasks = data.get("tasks", {})
-                statuses = {}
-                for t in tasks.values():
-                    s = t.get("status", "unknown")
-                    statuses[s] = statuses.get(s, 0) + 1
-                total = len(tasks)
-                done = statuses.get("completed", 0)
-                return {
-                    "Progress": f"{done}/{total}",
-                    "Completed": done,
-                    "Pending": statuses.get("pending", 0),
-                    "Running": statuses.get("running", 0),
-                    "Failed": statuses.get("failed", 0),
-                    "Total": total,
-                }
-            except Exception:
-                return None
+            tr = d / rid / "tracking.json"
+            if tr.exists():
+                try:
+                    t = json.loads(tr.read_text())
+                    return {"Targets": len(t.get("targets", [])),
+                            "Status": t.get("status", "unknown"),
+                            "Mode": t.get("mode", "?")}
+                except Exception:
+                    return None
 
     server = ThreadingHTTPServer(("0.0.0.0", port), DashHandler)
     server.socket.settimeout(1.0)  # don't hang forever on stale connections
