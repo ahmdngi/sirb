@@ -7,7 +7,10 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sirb.core import (
@@ -719,49 +722,24 @@ def _dashboard(args):
             if path == "/run/new":
                 mmsis = params.get("mmsi", [""])[0].strip()
                 mode = params.get("mode", ["fast"])[0].strip()
-                profile = params.get("profile", [""])[0].strip()
-                model = params.get("model", [""])[0].strip()
                 if not mmsis:
-                    self._send_json({"error": "No MMSI provided"}, 400)
+                    self._send_json({"error": "No IMO/MMSI provided"}, 400)
                     return
+                queue_dir = Path("/root/shipcrawler/queue/pending")
+                queue_dir.mkdir(parents=True, exist_ok=True)
                 mmsi_list = [m.strip() for m in mmsis.replace(",", " ").split() if m.strip()]
-                tasks_json = json.dumps({"mmsi": mmsi_list if len(mmsi_list) > 1 else mmsi_list[0],
-                                          "mode": mode})
-                # Write to temp file for sirb run --tasks
-                import tempfile
-                tf = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, prefix="sirb-dash-")
-                tf.write(json.dumps({"tasks": [{"mmsi": mmsi_list if len(mmsi_list) > 1 else mmsi_list[0],
-                                                "mode": mode}]}))
-                tf.close()
-                hermes_python = sys.executable
-                args_list = ["sirb", "run",
-                             "--tasks", tf.name]
-                env = os.environ.copy()
-                env["SIRB_RUN_DIR"] = str(runs_base.parent)
-                if profile and profile not in ("", "default"):
-                    env["SIRB_HERMES_PROFILE"] = profile
-                if model:
-                    env["SIRB_HERMES_MODEL"] = model
-                try:
-                    proc = subprocess.Popen(
-                        args_list,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, env=env,
-                    )
-                    run_id = f"web-{int(time.time())}"
-                    with proc_lock:
-                        running_procs[run_id] = proc
-                    # Log output in background
-                    def _log_output(pid, p):
-                        for line in p.stdout:
-                            line = line.rstrip()
-                        with proc_lock:
-                            running_procs.pop(pid, None)
-                    threading.Thread(target=_log_output, args=(run_id, proc), daemon=True).start()
-                    self._send_json({"run_id": run_id, "status": "started"})
-                except Exception as e:
-                    self._send_json({"error": str(e)}, 500)
+                for m in mmsi_list:
+                    task = {
+                        "mmsi": m, "mode": mode,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    task_file = queue_dir / f"{m}-{uuid.uuid4().hex[:8]}.json"
+                    task_file.write_text(json.dumps(task))
+                run_id = f"web-{int(time.time())}"
+                with proc_lock:
+                    running_procs[run_id] = None
+                self._send_json({"run_id": run_id, "status": "started",
+                                 "targets": len(mmsi_list)})
 
             elif path.startswith("/run/") and path.endswith("/stop"):
                 rid = path.split("/")[2]
