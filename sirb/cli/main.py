@@ -972,6 +972,18 @@ def _dashboard(args):
                             cmd.extend(["--profile", prof])
                         if mod:
                             cmd.extend(["--model", mod])
+                        # Look up provider from profiles-models.json
+                        if mod or prof:
+                            try:
+                                pm = json.loads((Path(__file__).parent / "profiles-models.json").read_text())
+                                pk = prof or ""
+                                entries = pm.get(pk, []) + pm.get("", [])
+                                for e in entries:
+                                    if e["value"] == mod and e.get("provider"):
+                                        cmd.extend(["--provider", e["provider"]])
+                                        break
+                            except Exception:
+                                pass
                         try:
                             proc = subprocess.Popen(
                                 cmd,
