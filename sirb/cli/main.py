@@ -636,7 +636,12 @@ def _dashboard(args):
             elif tr.exists():
                 try:
                     t = json.loads(tr.read_text())
+                    agents = t.get("agents", {})
+                    done = sum(1 for a in agents.values() if a.get("status") == "done")
+                    failed = sum(1 for a in agents.values() if a.get("status") in ("failed", "timeout", "error"))
                     info["targets"] = len(t.get("targets", []))
+                    info["done"] = done
+                    info["failed"] = failed
                     info["generated_at"] = t.get("created_at", "")
                     info["status"] = t.get("status", "running")
                 except Exception:
@@ -1235,6 +1240,11 @@ body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color
 .vessel-btn { background:none;border:none;color:var(--text-3);font-size:0.72em;padding:0.3em 0.5em;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;transition:color 0.15s,border-color 0.15s; }
 .vessel-btn:hover { color:var(--text-1); }
 .vessel-btn.active { color:var(--green);border-bottom-color:var(--green); }
+.final-summary { max-width:100%; margin:0.5em auto 0.75em; display:flex; justify-content:center; gap:0.75rem; flex-wrap:nowrap; padding:0.5rem 0.8rem; background:var(--bg-3); border:1px solid var(--border); border-radius:8px; overflow-x:auto; }
+.summary-stat { text-align:center; display:flex; flex-direction:column; align-items:center; gap:0.1rem; min-width:0; flex-shrink:1; }
+.stat-icon { font-size:0.85rem; line-height:1; opacity:0.7; }
+.stat-value { font-size:1.05rem; font-weight:bold; color:var(--green); }
+.stat-label { font-size:0.62rem; color:var(--text-3); text-transform:uppercase; letter-spacing:0.04em; }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; }
 nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
 nav .brand { font-size:1.1em; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
@@ -1322,6 +1332,14 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
         <button class="tab-btn" data-tab="connections" onclick="switchTab('connections')">🔗 Connections</button>
         <span id="vessel-tabs"></span>
       </div>
+      <div id="final-summary" class="final-summary" style="display:none;">
+        <div class="summary-stat"><span class="stat-icon">🎯</span><span class="stat-value" id="s-targets">0</span><span class="stat-label">Targets</span></div>
+        <div class="summary-stat"><span class="stat-icon">✅</span><span class="stat-value" id="s-done">0</span><span class="stat-label">Done</span></div>
+        <div class="summary-stat"><span class="stat-icon">❌</span><span class="stat-value" id="s-failed">0</span><span class="stat-label">Failed</span></div>
+        <div class="summary-stat"><span class="stat-icon">⏱</span><span class="stat-value" id="s-duration">—</span><span class="stat-label">Duration</span></div>
+        <div class="summary-stat"><span class="stat-icon">🧠</span><span class="stat-value" id="s-model">—</span><span class="stat-label">Model</span></div>
+        <div class="summary-stat"><span class="stat-icon">🔗</span><span class="stat-value" id="s-connections">0</span><span class="stat-label">Connections</span></div>
+      </div>
       <div class="terminal-window">
         <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title" id="report-title">swarm-report.md</span></div>
         <div class="terminal-body" id="assessment-view"><span style="color:var(--text-3)">Select a run to view its assessment.</span></div>
@@ -1362,9 +1380,9 @@ evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.
 function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}}
 async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
 
-async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
+async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 
-async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";return}renderTab("swarm");loadVessels(rid)}
+async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}renderTab("swarm");loadVessels(rid);fetch("/runs").then(x=>x.json()).then(runs=>{const run=runs.find(x=>x.id===rid);if(run){document.getElementById("s-targets").textContent=run.targets||"?";document.getElementById("s-done").textContent=run.done||"?";document.getElementById("s-failed").textContent=run.failed||"0";document.getElementById("s-duration").textContent=run.status||"—"}});document.getElementById("final-summary").style.display="flex";fetch("/run/"+rid+"/connections").then(x=>x.text()).then(t=>{const pairs=(t.match(/\| [A-Za-z0-9]+ — [A-Za-z0-9]+ \|/g)||[]).length;document.getElementById("s-connections").textContent=pairs})}
 
 async function loadVessels(rid){const r=await fetch("/run/"+rid+"/vessels");const v=await r.json();let html="";v.forEach(v=>{html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+v.target+'\',\''+v.files[0]+'\')">🚢 '+v.target.slice(0,12)+'</button>'});document.getElementById("vessel-tabs").innerHTML=html;if(!v.length){document.getElementById("connections").disabled=true}}
 
