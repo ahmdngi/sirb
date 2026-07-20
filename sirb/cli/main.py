@@ -745,7 +745,7 @@ def _dashboard(args):
                     env["SIRB_HERMES_MODEL"] = model
                 try:
                     proc = subprocess.Popen(
-                        args_list + ["--tasks", tasks_json],
+                        args_list,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, env=env,
                     )
