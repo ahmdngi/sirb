@@ -548,12 +548,15 @@ def _dashboard(args):
             for fb in cfg.get("fallback_providers", []):
                 if isinstance(fb, dict) and fb.get("model"):
                     models.add(fb["model"])
-            # TTS / STT models
-            for section in ("tts", "stt", "voice"):
-                sec = cfg.get(section, {})
-                for sub in sec.values() if isinstance(sec, dict) else []:
-                    if isinstance(sub, dict) and sub.get("model"):
-                        models.add(sub["model"])
+            # Filter out non-LLM models (TTS, STT, speech/audio only)
+            known_non_llm = {"whisper-1", "base", "gpt-4o-mini-tts"}
+            models = {
+                m for m in models
+                if m not in known_non_llm
+                and "tts" not in m.lower()
+                and "voxtral" not in m.lower()
+                and "neuphonic" not in m.lower()
+            }
             return sorted(models) if models else ["deepseek-v4-flash"]
         except Exception:
             return [cfg.get("model", {}).get("default", "deepseek-v4-flash")]
