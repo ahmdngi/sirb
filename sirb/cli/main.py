@@ -679,6 +679,59 @@ def _dashboard(args):
         except Exception:
             return []
 
+    def _extract_vessel_data(target: str, vessels_dir: Path) -> dict:
+        """Extract structured vessel data from agent log files."""
+        data = {"target": target, "name": target, "mmsi": "", "imo": "",
+                "owner": "", "operator": "", "manager": "", "flag": "",
+                "callsign": "", "type": "", "tonnage": "", "year_built": "",
+                "ports": [], "connections": ""}
+        # Read agent log
+        log_path = vessels_dir / f"{target}.log"
+        if not log_path.exists():
+            # Check subdirectory
+            sub = vessels_dir / target
+            files = list(sub.glob("*.md")) + list(sub.glob("*.log")) + list(sub.glob("*.txt"))
+            log_path = files[0] if files else None
+        if not log_path or not log_path.exists():
+            return data
+        text = log_path.read_text(errors="replace")
+
+        # Extract IMO number
+        m = re.search(r'\bIMO\s*:?\s*(\d{7})\b', text, re.IGNORECASE)
+        if m: data["imo"] = m.group(1)
+        m = re.search(r'\bIMO\s*(\d{7})\b', text)
+        if m: data["imo"] = m.group(1)
+
+        # Extract MMSI
+        m = re.search(r'\bMMSI\s*:?\s*(\d{9})\b', text, re.IGNORECASE)
+        if m: data["mmsi"] = m.group(1)
+
+        # Extract vessel name
+        m = re.search(r'(?i)(?:vessel\s*[:\-*]\s*|name\s*[:\-*]\s*|ship\s*[:\-*]\s*["\']?)([A-Za-z0-9\s\-]+?)(?:\s*[,\.]|\s*MMSI|\s*IMO|\s*Flag|\s*$)', text)
+        if m: data["name"] = m.group(1).strip()
+
+        # Extract flag
+        m = re.search(r'(?i)Flag\s*:?\s*([A-Za-z\s]+?)(?:\s*[,\.]|\s*\n|$)', text)
+        if m: data["flag"] = m.group(1).strip()
+
+        # Extract owner
+        m = re.search(r'(?i)(?:Owner|Registered\s*owner)\s*:?\s*["\']?([A-Za-z0-9\s\.\,\-&\']+?)(?:\s*[,\.]|\s*Address|\s*Operator|\s*$)', text)
+        if m: data["owner"] = m.group(1).strip()
+
+        # Extract operator
+        m = re.search(r'(?i)(?:Operator|Commercial\s*operator)\s*:?\s*["\']?([A-Za-z0-9\s\.\,\-&\']+?)(?:\s*[,\.]|\s*$)', text)
+        if m: data["operator"] = m.group(1).strip()
+
+        # Extract port calls
+        port_matches = re.findall(r'(?i)(?:Port|Port\s*call|Called\s*at)\s*:?\s*["\']?([A-Za-z\s\-]+?)(?:\s*[,\.]|\s*on|\s*Date|\s*$)', text)
+        data["ports"] = list(set(p.strip() for p in port_matches if len(p.strip()) > 2))
+
+        # Extract AIS proximity / connections
+        conn_matches = re.findall(r'(?i)(?:connection|related|linked|associated\s*with|same\s*owner|sister\s*ship)[^.]*\.', text)
+        data["connections"] = " ".join(conn_matches[:5])
+
+        return data
+
     def _generate_connections(agents: dict, vessels_dir: Path) -> str:
         """Analyze cross-vessel connections from agent outputs."""
         parts = ["# Cross-Vessel Connection Analysis\n\n"]
@@ -687,19 +740,72 @@ def _dashboard(args):
             parts.append("*Only one target — no cross-vessel connections to analyze.*\n")
             return "".join(parts)
 
+        # Extract data for each vessel
+        vessel_data = {}
+        for t in targets:
+            d = _extract_vessel_data(t, vessels_dir)
+            vessel_data[t] = d
+
         parts.append(f"**Targets analyzed:** {', '.join(targets)}\n\n")
+
+        # ── Shared ownership ──
         parts.append("## Shared Ownership & Management\n\n")
-        parts.append("*(Requires Equasis/registry data from each vessel report — "
-                     "check per-vessel logs for owner/operator/manager details.)*\n\n")
-        parts.append("## Overlapping Port Calls\n\n")
-        parts.append("*(Port call analysis requires AIS tracking data from each agent. "
-                     "Cross-reference timestamps and ports.)*\n\n")
-        parts.append("## Connection Summary\n\n")
-        parts.append("| Vessel Pair | Potential Connection | Confidence |\n")
-        parts.append("|-------------|---------------------|------------|\n")
+        found_ownership = False
         for i, a in enumerate(targets):
             for b in targets[i+1:]:
-                parts.append(f"| {a} — {b} | Pending analysis | MEDIUM |\n")
+                da = vessel_data[a]
+                db = vessel_data[b]
+                if da["owner"] and db["owner"] and da["owner"].lower() == db["owner"].lower():
+                    parts.append(f"- **{a}** and **{b}** share same owner: **{da['owner']}** (HIGH confidence)\n")
+                    found_ownership = True
+                    break
+                if da["operator"] and db["operator"] and da["operator"].lower() == db["operator"].lower():
+                    parts.append(f"- **{a}** and **{b}** share same operator: **{da['operator']}** (HIGH confidence)\n")
+                    found_ownership = True
+                    break
+        if not found_ownership:
+            parts.append("*(No shared owners or operators detected across targets.)*\n")
+
+        # ── Flag analysis ──
+        parts.append("\n## Flag State\n\n")
+        flags = {}
+        for t in targets:
+            d = vessel_data[t]
+            f = d["flag"] or "unknown"
+            flags.setdefault(f, []).append(t)
+        for f, vessels in flags.items():
+            if len(vessels) > 1:
+                parts.append(f"- **{f}**: {', '.join(vessels)} — same flag state\n")
+        if len(flags) <= 1:
+            parts.append("*(All targets have different or unknown flag states.)*\n")
+
+        # ── Overlapping port calls ──
+        parts.append("\n## Overlapping Port Calls\n\n")
+        found_ports = False
+        for i, a in enumerate(targets):
+            for b in targets[i+1:]:
+                common = set(vessel_data[a]["ports"]) & set(vessel_data[b]["ports"])
+                if common:
+                    parts.append(f"- **{a}** & **{b}** both visited: {', '.join(f'**{p}**' for p in common)}\n")
+                    found_ports = True
+        if not found_ports:
+            parts.append("*(No overlapping port calls detected.)*\n")
+
+        # ── Connection summary table ──
+        parts.append("\n## Connection Summary\n\n")
+        parts.append("| Vessel Pair | Shared Owner | Shared Flag | Shared Ports | Confidence |\n")
+        parts.append("|-------------|-------------|-------------|--------------|------------|\n")
+        for i, a in enumerate(targets):
+            for b in targets[i+1:]:
+                da, db = vessel_data[a], vessel_data[b]
+                owner_match = "✅" if (da["owner"] and db["owner"] and
+                              da["owner"].lower() == db["owner"].lower()) else "❌"
+                flag_match = "✅" if (da["flag"] and db["flag"] and
+                             da["flag"].lower() == db["flag"].lower()) else "❌"
+                port_match = "✅" if set(da["ports"]) & set(db["ports"]) else "❌"
+                conf = "HIGH" if owner_match == "✅" else "MEDIUM" if flag_match == "✅" else "LOW"
+                parts.append(f"| {a} — {b} | {owner_match} | {flag_match} | {port_match} | {conf} |\n")
+
         parts.append("\n---\n*Generated by Sirb swarm correlation engine.*\n")
         return "".join(parts)
 
@@ -711,12 +817,18 @@ def _dashboard(args):
         lines.append(f"**Targets ({len(targets)}):** {', '.join(targets)}\n")
         lines.append(f"**Generated:** {datetime.now(timezone.utc).isoformat()}\n\n")
         lines.append("## Agent Results\n\n")
-        lines.append("| Target | Status |\n")
-        lines.append("|--------|--------|\n")
-        for t, a in agents.items():
+        lines.append("| Target | Status | IMO | Flag | Owner |\n")
+        lines.append("|--------|--------|-----|------|-------|\n")
+        vessels_dir = runs_base / rid / "vessels"
+        for t in targets:
+            a = agents.get(t, {})
             s = a.get("status", "?")
             icon = "✅" if s == "done" else "❌"
-            lines.append(f"| {t} | {icon} {s} |\n")
+            d = _extract_vessel_data(t, vessels_dir)
+            imo = d["imo"] or "—"
+            flag = d["flag"] or "—"
+            owner = d["owner"][:30] if d["owner"] else "—"
+            lines.append(f"| {t} | {icon} | {imo} | {flag} | {owner} |\n")
         lines.append(f"\n## Cross-Vessel Analysis\n\n{connections}\n")
         return "".join(lines)
 
