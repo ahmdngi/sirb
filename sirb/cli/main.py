@@ -813,13 +813,15 @@ def _dashboard(args):
                     tr_path = runs_base / rid / "tracking.json"
 
                     def _run_agent(target):
+                        agent_dir = runs_base / rid / "vessels" / target
+                        agent_dir.mkdir(parents=True, exist_ok=True)
                         prompt = (
                             f"Using the shipcrawler OSINT framework, research the vessel {target}. "
                             f"Execute ALL phases: Equasis identity, AIS tracking, "
                             f"Shodan attack surface, CVE vulnerability assessment, "
                             f"threat intelligence from news and maritime cyber incidents. "
                             f"Mode: {md}. "
-                            f"Generate a comprehensive report with full findings."
+                            f"SAVE ALL report files to the directory: {agent_dir}/"
                         )
                         env = os.environ.copy()
                         cmd = ["hermes", "chat", "-q", prompt,
