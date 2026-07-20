@@ -861,6 +861,23 @@ def _dashboard(args):
             else:
                 self._send_json({"error": "not found"}, 404)
 
+        def do_DELETE(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/run/"):
+                rid = path.split("/")[2]
+                rundir = runs_base / rid
+                if rundir.exists():
+                    import shutil
+                    shutil.rmtree(str(rundir))
+                    with proc_lock:
+                        running_procs.pop(rid, None)
+                    self._send_json({"status": "deleted"})
+                else:
+                    self._send_json({"error": "not found"}, 404)
+            else:
+                self._send_json({"error": "not found"}, 404)
+
         # ── response helpers ──────────────────────────────────────────
 
         def _send_json(self, data, status=200):
@@ -922,10 +939,20 @@ body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color
 .sidebar-header { padding:1em; border-bottom:1px solid var(--border); }
 .sidebar-header h2 { font-size:0.75em; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-2); font-weight:600; }
 .sidebar-list { flex:1; overflow-y:auto; padding:0.5em; }
-.run-item { padding:0.55em 0.65em; margin-bottom:0.25em; border-radius:6px; cursor:pointer; font-size:0.82em; transition:background 0.15s,border-left 0.15s; border-left:3px solid transparent; }
+.run-item { position:relative; padding:0.55em 0.65em; margin-bottom:0.25em; border-radius:6px; cursor:pointer; font-size:0.82em; transition:background 0.15s,border-left 0.15s; border-left:3px solid transparent; }
 .run-item:hover { background:var(--bg-3); }
 .run-item.active { background:var(--bg-3); border-left-color:var(--accent); }
 .run-item .date { font-size:0.7em; color:var(--text-3); }
+.sidebar-delete {
+  position:absolute; top:0.3rem; right:0.3rem;
+  width:1.4rem; height:1.4rem; padding:0;
+  border:none; border-radius:3px; cursor:pointer;
+  font-size:0.75rem; line-height:1.4rem; text-align:center;
+  background:transparent; color:var(--text-3);
+  opacity:0; transition:opacity 0.15s,color 0.15s;
+}
+.run-item:hover .sidebar-delete { opacity:1; }
+.sidebar-delete:hover { color:var(--red) !important; background:rgba(248,81,73,0.1); }
 .run-empty { padding:1.5em 0; text-align:center; color:var(--text-3); font-size:0.78em; }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; }
 nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
@@ -1042,7 +1069,9 @@ evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status"
 evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
 evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.data)liveStats(d.data)}catch(_){}};
 function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}}
-async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
+async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
+
+async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its assessment.</span>'}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");const r=await fetch("/run/"+rid+"/assessment");const t=await r.text();document.getElementById("assessment-view").innerHTML=t?t.replace(/\n/g,"<br>"):'<span style="color:var(--text-3)">Assessment not ready yet.</span>';loadPositions(rid)}
 async function loadPositions(rid){const r=await fetch("/run/"+rid+"/positions");const pts=await r.json();if(!map)return;markers.forEach(m=>map.removeLayer(m));markers=[];if(!pts.length)return;pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:6,color:"#f85149",fillColor:"#f85149",fillOpacity:0.8}).addTo(map).bindPopup("<b>"+p.target_id+"</b><br/>Dest: "+p.destination);markers.push(m)});if(pts.length)map.fitBounds(markers.map(m=>m.getLatLng()),{padding:[30,30]})}
 function initMap(){if(!document.getElementById("map"))return;map=L.map("map",{zoomControl:true,attributionControl:false}).setView([59.5,24.5],3);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(map)}
