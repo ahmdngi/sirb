@@ -8,8 +8,7 @@
     {"value": "claude-haiku-4-5", "provider": "anthropic", "label": "Claude Haiku 4.5"},
     {"value": "claude-sonnet-5", "provider": "anthropic", "label": "Claude Sonnet 5"},
     {"value": "claude-fable-5", "provider": "anthropic", "label": "Claude Fable 5"},
-    {"value": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "provider": "custom:llama-local", "label": "Llama 3.1 8B (local)"},
-    {"value": "glm-5.2", "provider": "custom:UT-GLM5.2", "label": "GLM 5.2"}
+    {"value": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "provider": "custom:llama-local", "label": "Llama 3.1 8B (local)"}
   ],
   "local": [
     {"value": "qwen2.5:3b", "provider": "custom:ollama", "label": "Qwen 2.5 3B"},
@@ -26,8 +25,7 @@
     {"value": "claude-opus-4-6", "provider": "anthropic", "label": "Claude Opus 4.6"},
     {"value": "claude-sonnet-5", "provider": "anthropic", "label": "Claude Sonnet 5"},
     {"value": "gpt-4o", "provider": "openai", "label": "GPT-4o"},
-    {"value": "gpt-4o-mini", "provider": "openai", "label": "GPT-4o Mini"},
-    {"value": "glm-5.2", "provider": "custom:UT-GLM5.2", "label": "GLM 5.2"}
+    {"value": "gpt-4o-mini", "provider": "openai", "label": "GPT-4o Mini"}
   ],
   "shipcrawler": [
     {"value": "deepseek-v4-flash", "provider": "deepseek", "label": "DeepSeek V4 Flash"},
