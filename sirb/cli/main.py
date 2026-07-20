@@ -730,7 +730,7 @@ def _dashboard(args):
                 mmsi_list = [m.strip() for m in mmsis.replace(",", " ").split() if m.strip()]
                 for m in mmsi_list:
                     task = {
-                        "mmsi": m, "mode": mode,
+                        "name": m, "mode": mode, "context": "",
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                     task_file = queue_dir / f"{m}-{uuid.uuid4().hex[:8]}.json"
