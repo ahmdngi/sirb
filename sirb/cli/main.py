@@ -617,19 +617,16 @@ def _dashboard(args):
         return sorted(models)
 
     def _list_runs() -> list[dict]:
-        report_base = Path("/root/hermes-vault/osint-reports")
-        if not report_base.exists():
+        if not runs_base.exists():
             return []
         out = []
-        for d in sorted(report_base.iterdir(), key=os.path.getmtime, reverse=True):
+        for d in sorted(runs_base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
             if not d.is_dir():
                 continue
-            if d.name in ("dashboards",):
-                continue
-            ap = d / "analyst-report.md"
+            ap = d / "assessment.md"
             mtime = d.stat().st_mtime if d.stat() else 0
             info = {"id": d.name, "has_assessment": ap.exists(),
-                    "mtime": mtime}
+                    "mtime": mtime, "generated_at": ""}
             if ap.exists():
                 info["generated_at"] = datetime.fromtimestamp(mtime).isoformat()
             out.append(info)
@@ -638,57 +635,37 @@ def _dashboard(args):
         return out
 
     def _load_assessment(rid: str) -> str | None:
-        """Load analyst-report.md from osint-reports."""
-        report_base = Path("/root/hermes-vault/osint-reports")
-        for d in report_base.iterdir():
-            if not d.is_dir() or d.name in ("dashboards",):
-                continue
-            if d.name == rid or rid in d.name:
-                ap = d / "analyst-report.md"
-                if ap.exists():
-                    return ap.read_text()
-        return None
+        mdp = runs_base / rid / "assessment.md"
+        return mdp.read_text() if mdp.exists() else None
 
-    def _load_done_task(rid: str) -> dict | None:
-        """Look for matching task in ShipCrawler done/ queue."""
-        done_dir = Path("/root/shipcrawler/queue/done")
-        if not done_dir.exists():
-            return None
-        for f in done_dir.glob("*.json"):
-            try:
-                data = json.loads(f.read_text())
-                if data.get("task_id", "") == rid or rid in data.get("report_dir", ""):
-                    return data
-            except Exception:
-                continue
-        return None
+    def _load_assessment_json(rid: str) -> dict:
+        sjp = runs_base / rid / "assessment-summary.json"
+        if sjp.exists():
+            return json.loads(sjp.read_text())
+        return {}
 
     def _vessel_positions(rid: str) -> list[dict]:
-        """Extract vessel lat/lon from analyst report via regex."""
-        report_base = Path("/root/hermes-vault/osint-reports")
-        for d in report_base.iterdir():
-            if not d.is_dir() or d.name in ("dashboards",):
-                continue
-            if d.name == rid or rid in d.name:
-                ap = d / "analyst-report.md"
-                if not ap.exists():
-                    return []
-                text = ap.read_text()
-                positions = []
-                # Match lat/lon patterns like "59.5°N, 24.5°E" or "59.5, 24.5"
-                for m in re.finditer(r'(\d+\.?\d*)\s*°?\s*[NnSs],?\s*(\d+\.?\d*)\s*°?\s*[EeWw]', text):
-                    lat = float(m.group(1))
-                    lon = float(m.group(2))
-                    positions.append({"lat": lat, "lon": lon,
-                                      "target_id": rid, "destination": ""})
-                if not positions:
-                    for m in re.finditer(r'Lat(?:itude)?[:\s]+(\d+\.?\d*).*?Lon(?:gitude)?[:\s]+(\d+\.?\d*)', text, re.IGNORECASE):
-                        lat = float(m.group(1))
-                        lon = float(m.group(2))
-                        positions.append({"lat": lat, "lon": lon,
-                                          "target_id": rid, "destination": ""})
-                return positions
-        return []
+        bp = runs_base / rid / "blackboard.json"
+        if not bp.exists():
+            return []
+        try:
+            data = json.loads(bp.read_text())
+            findings = data.get("findings", [])
+            positions = []
+            for f in findings:
+                if f.get("finding_type") == "current_position":
+                    detail = f.get("detail", {})
+                    lat = detail.get("lat")
+                    lon = detail.get("lon")
+                    if lat and lon:
+                        positions.append({
+                            "target_id": f.get("target_id"),
+                            "lat": lat, "lon": lon,
+                            "destination": detail.get("destination", ""),
+                        })
+            return positions
+        except Exception:
+            return []
 
     # ── Dashboard handler ──────────────────────────────────────────────
 
