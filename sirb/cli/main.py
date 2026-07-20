@@ -611,6 +611,7 @@ def _dashboard(args):
             if path == "/run/new":
                 mmsis = params.get("mmsi", [""])[0].strip()
                 mode = params.get("mode", ["fast"])[0].strip()
+                profile = params.get("profile", ["default"])[0].strip()
                 if not mmsis:
                     self._send_json({"error": "No MMSI provided"}, 400)
                     return
@@ -629,6 +630,8 @@ def _dashboard(args):
                              "--tasks", tf.name]
                 env = os.environ.copy()
                 env["SIRB_RUN_DIR"] = str(runs_base.parent)
+                if profile and profile != "default":
+                    env["SIRB_HERMES_PROFILE"] = profile
                 try:
                     proc = subprocess.Popen(
                         args_list + ["--tasks", tasks_json],
@@ -667,6 +670,7 @@ def _dashboard(args):
                 lon = params.get("lon", [""])[0].strip()
                 radius = params.get("radius", ["50"])[0].strip()
                 label = params.get("label", [f"{lat},{lon}"])[0].strip()
+                profile = params.get("profile", ["default"])[0].strip()
                 if not lat or not lon:
                     self._send_json({"error": "lat and lon required"}, 400)
                     return
@@ -680,6 +684,8 @@ def _dashboard(args):
                 hermes_python = sys.executable
                 env = os.environ.copy()
                 env["SIRB_GEO_TARGETS"] = json.dumps(geo_cfg)
+                if profile and profile != "default":
+                    env["SIRB_HERMES_PROFILE"] = profile
                 args_list = [hermes_python, "-m", "sirb", "run"]
                 try:
                     proc = subprocess.Popen(
@@ -700,6 +706,7 @@ def _dashboard(args):
 
             elif path == "/run/port":
                 port_key = params.get("port", [""])[0].strip()
+                profile = params.get("profile", ["default"])[0].strip()
                 if not port_key:
                     self._send_json({"error": "port required"}, 400)
                     return
@@ -718,6 +725,8 @@ def _dashboard(args):
                     hermes_python = sys.executable
                     env = os.environ.copy()
                     env["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
+                    if profile and profile != "default":
+                        env["SIRB_HERMES_PROFILE"] = profile
                     args_list = [hermes_python, "-m", "sirb", "run"]
                     proc = subprocess.Popen(
                         args_list, stdout=subprocess.PIPE,
@@ -894,6 +903,15 @@ th { color: #8b949e; font-weight: 600; }
           <option value="deep">Deep (~10 min)</option>
         </select>
       </div>
+      <div class="form-group">
+        <label>Agent Profile</label>
+        <select id="profile-select">
+          <option value="default">default</option>
+          <option value="shipcrawler">shipcrawler</option>
+          <option value="research">research</option>
+          <option value="local">local</option>
+        </select>
+      </div>
       <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
       <button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button>
       <hr style="border-color:#30363d;margin:1em 0;" />
@@ -999,6 +1017,7 @@ async function loadPositions(rid) {
 
 async function launchRun() {
   const method = document.getElementById("method-select").value;
+  const profile = document.getElementById("profile-select").value;
 
   if (method === "mmsi") {
     const mmsi = document.getElementById("mmsi-input").value.trim();
@@ -1007,7 +1026,7 @@ async function launchRun() {
     const r = await fetch("/run/new", {
       method: "POST",
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "mmsi=" + encodeURIComponent(mmsi) + "&mode=" + encodeURIComponent(mode),
+      body: "mmsi=" + encodeURIComponent(mmsi) + "&mode=" + encodeURIComponent(mode) + "&profile=" + encodeURIComponent(profile),
     });
     handleLaunchResponse(r);
   }
@@ -1017,7 +1036,7 @@ async function launchRun() {
     const r = await fetch("/run/port", {
       method: "POST",
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "port=" + encodeURIComponent(port) + "&mode=" + encodeURIComponent(mode),
+      body: "port=" + encodeURIComponent(port) + "&mode=" + encodeURIComponent(mode) + "&profile=" + encodeURIComponent(profile),
     });
     handleLaunchResponse(r);
   }
@@ -1031,7 +1050,8 @@ async function launchRun() {
       method: "POST",
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
-          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label),
+          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label)
+          + "&profile=" + encodeURIComponent(profile),
     });
     handleLaunchResponse(r);
   }
