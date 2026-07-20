@@ -1037,7 +1037,8 @@ def _dashboard(args):
                     vessels_path = runs_base / rid / "vessels"
                     tr_path = runs_base / rid / "tracking.json"
 
-                    def _run_agent(target):
+                    # ── Helper: launch a single agent ──
+                    def _launch_agent(target):
                         agent_dir = runs_base / rid / "vessels" / target
                         agent_dir.mkdir(parents=True, exist_ok=True)
                         prompt = (
@@ -1058,36 +1059,55 @@ def _dashboard(args):
                             cmd.extend(["--profile", prof])
                         if mod:
                             cmd.extend(["--model", mod])
-                        # Don't pass --provider explicitly — let profile config handle it
-                        try:
-                            proc = subprocess.Popen(
-                                cmd,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, env=env,
-                            )
-                            output, _ = proc.communicate(timeout=600)
-                            status = "done" if proc.returncode == 0 else "failed"
-                            # Save agent output
-                            (vessels_path / f"{target}.log").write_text(output)
-                            return {"target": target, "status": status,
-                                    "exit_code": proc.returncode}
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            return {"target": target, "status": "timeout", "exit_code": -1}
-                        except Exception as e:
-                            return {"target": target, "status": "error", "error": str(e)}
+                        return subprocess.Popen(
+                            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, env=env,
+                        )
 
-                    # Run agents sequentially (avoid resource exhaustion)
+                    # ── Parallel agent launch ──
+                    procs = {}
                     for t in targets:
-                        result = _run_agent(t)
-                        agents[t] = result
-                        # Update tracking after each agent
                         try:
-                            tr = json.loads(tr_path.read_text())
-                            tr["agents"] = agents
-                            tr_path.write_text(json.dumps(tr))
-                        except Exception:
-                            pass
+                            proc = _launch_agent(t)
+                            procs[t] = proc
+                        except Exception as e:
+                            agents[t] = {"target": t, "status": "error", "error": str(e)}
+                            procs[t] = None
+
+                    # Poll all until done (with total timeout)
+                    start_swarm = time.time()
+                    max_wait = 900  # 15 min total
+                    while procs and (time.time() - start_swarm) < max_wait:
+                        for t in list(procs.keys()):
+                            p = procs[t]
+                            if p is None:
+                                del procs[t]
+                                continue
+                            ret = p.poll()
+                            if ret is not None:
+                                # Agent finished
+                                output, _ = p.communicate()
+                                status = "done" if ret == 0 else "failed"
+                                (vessels_path / f"{t}.log").write_text(output or "")
+                                agents[t] = {"target": t, "status": status, "exit_code": ret}
+                                del procs[t]
+                                # Update tracking immediately
+                                try:
+                                    tr = json.loads(tr_path.read_text())
+                                    tr["agents"] = agents
+                                    tr_path.write_text(json.dumps(tr))
+                                except Exception:
+                                    pass
+                        if procs:
+                            time.sleep(2)  # avoid busy-wait
+
+                    # Kill any remaining (timed out)
+                    for t, p in procs.items():
+                        if p and p.poll() is None:
+                            p.kill()
+                            output, _ = p.communicate()
+                            (vessels_path / f"{t}.log").write_text(output or "")
+                            agents[t] = {"target": t, "status": "timeout", "exit_code": -1}
 
                     # Generate connections analysis
                     connections = _generate_connections(agents, vessels_path)
