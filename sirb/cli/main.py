@@ -743,12 +743,31 @@ def _dashboard(args):
                  "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
                  "model": "—"}
         log_path = vessels_dir / f"{target}.log"
-        if not log_path.exists():
+        text = None
+        if log_path.exists():
+            text = log_path.read_text(errors="replace")
+        else:
+            # Fallback: read all .md reports from vessel subdirectory
+            sub = vessels_dir / target
+            texts = []
+            for f in sorted(sub.glob("*.md")):
+                try:
+                    texts.append(f.read_text(errors="replace"))
+                except Exception:
+                    pass
+            if texts:
+                text = "\n".join(texts)
+        if not text:
             return stats
-        text = log_path.read_text(errors="replace")
 
+        # Try agent-log patterns first (tool calls, searches, etc.)
+        # Then fall back to report-content patterns
         phases = re.findall(r'(?i)(?:##\s*Phase|Phase\s*\d|Executing phase|Investigating)', text)
         stats["phases"] = len(phases)
+        # Fallback: count top-level markdown sections as phases
+        if stats["phases"] == 0:
+            sections = re.findall(r'^## \d', text, re.MULTILINE)
+            stats["phases"] = len(sections)
 
         dur = re.search(r'(?i)(?:Duration|took|completed in)\s*[:\-]?\s*([\d\.]+\s*[smhd])', text)
         if dur: stats["duration"] = dur.group(1).strip()
