@@ -737,6 +737,73 @@ def _dashboard(args):
 
         return data
 
+    def _extract_agent_stats(target: str, vessels_dir: Path) -> dict:
+        """Extract ShipCrawler-style stats from agent log."""
+        stats = {"phases": 0, "duration": "—", "reports": 0,
+                 "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
+                 "model": "—"}
+        log_path = vessels_dir / f"{target}.log"
+        if not log_path.exists():
+            return stats
+        text = log_path.read_text(errors="replace")
+
+        phases = re.findall(r'(?i)(?:##\s*Phase|Phase\s*\d|Executing phase|Investigating)', text)
+        stats["phases"] = len(phases)
+
+        dur = re.search(r'(?i)(?:Duration|took|completed in)\s*[:\-]?\s*([\d\.]+\s*[smhd])', text)
+        if dur: stats["duration"] = dur.group(1).strip()
+        dur2 = re.search(r'(\d+\.?\d*)\s*s(?:ec(?:ond)?s?)?\s*(?:total|elapsed)?', text)
+        if dur2 and stats["duration"] == "—": stats["duration"] = dur2.group(1) + "s"
+
+        reports = re.findall(r'(?i)(?:Report\s*(?:saved|written|generated|created)|\.md\b)', text)
+        stats["reports"] = len(reports)
+
+        tc_n = re.search(r'(?i)tool_calls?[:\s]+(\d+)', text)
+        if tc_n: stats["tool_calls"] = int(tc_n.group(1))
+        else: stats["tool_calls"] = len(re.findall(r'(?i)(?:Tool call|⚙️)', text))
+
+        ss_n = re.search(r'(?i)searches?[:\s]+(\d+)', text)
+        if ss_n: stats["searches"] = int(ss_n.group(1))
+        else: stats["searches"] = len(re.findall(r'(?i)(?:Searching|🔍)', text))
+
+        src_n = re.search(r'(?i)sources?[:\s]+(\d+)', text)
+        if src_n: stats["sources"] = int(src_n.group(1))
+        else: stats["sources"] = len(re.findall(r'(?i)(?:Fetching|🌐)', text))
+
+        sh_n = re.search(r'(?i)shodan_hits?[:\s]+(\d+)', text)
+        if sh_n: stats["shodan"] = int(sh_n.group(1))
+        else: stats["shodan"] = len(re.findall(r'(?i)(?:Shodan|🛰️)', text))
+
+        md = re.search(r'(?i)(?:Model|model)[:\s]+([\w\.\-/]+)', text)
+        if md: stats["model"] = md.group(1).strip()
+
+        return stats
+
+    def _accumulate_stats(agents: dict, vessels_dir: Path) -> dict:
+        """Sum stats across all agents."""
+        total = {"phases": 0, "duration": "—", "reports": 0,
+                 "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
+                 "model": "—"}
+        durations = []
+        models = set()
+        for t in agents:
+            s = _extract_agent_stats(t, vessels_dir)
+            total["phases"] += s["phases"]
+            total["reports"] += s["reports"]
+            total["tool_calls"] += s["tool_calls"]
+            total["searches"] += s["searches"]
+            total["sources"] += s["sources"]
+            total["shodan"] += s["shodan"]
+            if s["duration"] != "—":
+                durations.append(s["duration"])
+            if s["model"] != "—":
+                models.add(s["model"])
+        if durations:
+            total["duration"] = ", ".join(durations)
+        if models:
+            total["model"] = ", ".join(sorted(models))
+        return total
+
     def _generate_connections(agents: dict, vessels_dir: Path) -> str:
         """Analyze cross-vessel connections from agent outputs."""
         parts = ["# Cross-Vessel Connection Analysis\n\n"]
@@ -879,6 +946,20 @@ def _dashboard(args):
                     self._send_html(cp.read_text())
                 else:
                     self._send_html("<p>Connections analysis not ready yet.</p>")
+            elif path.startswith("/run/") and path.endswith("/stats"):
+                rid = path.split("/")[2]
+                tr_path = runs_base / rid / "tracking.json"
+                if not tr_path.exists():
+                    self._send_json({"error": "run not found"}, 404)
+                    return
+                try:
+                    tr = json.loads(tr_path.read_text())
+                    agents = tr.get("agents", {})
+                    vd = runs_base / rid / "vessels"
+                    stats = _accumulate_stats(agents, vd)
+                    self._send_json(stats)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
             elif path.startswith("/run/") and "/vessel/" in path and path.endswith(".md"):
                 # /run/{rid}/vessel/{target}/{filename}.md
                 parts = path.split("/")
@@ -1333,12 +1414,14 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
         <span id="vessel-tabs"></span>
       </div>
       <div id="final-summary" class="final-summary" style="display:none;">
-        <div class="summary-stat"><span class="stat-icon">🎯</span><span class="stat-value" id="s-targets">0</span><span class="stat-label">Targets</span></div>
-        <div class="summary-stat"><span class="stat-icon">✅</span><span class="stat-value" id="s-done">0</span><span class="stat-label">Done</span></div>
-        <div class="summary-stat"><span class="stat-icon">❌</span><span class="stat-value" id="s-failed">0</span><span class="stat-label">Failed</span></div>
+        <div class="summary-stat"><span class="stat-icon">🧩</span><span class="stat-value" id="s-phases">0</span><span class="stat-label">Phases</span></div>
         <div class="summary-stat"><span class="stat-icon">⏱</span><span class="stat-value" id="s-duration">—</span><span class="stat-label">Duration</span></div>
+        <div class="summary-stat"><span class="stat-icon">📄</span><span class="stat-value" id="s-reports">0</span><span class="stat-label">Reports</span></div>
+        <div class="summary-stat"><span class="stat-icon">⚙️</span><span class="stat-value" id="s-toolcalls">—</span><span class="stat-label">Tool Calls</span></div>
+        <div class="summary-stat"><span class="stat-icon">🌐</span><span class="stat-value" id="s-sources">—</span><span class="stat-label">Sources</span></div>
+        <div class="summary-stat"><span class="stat-icon">🔍</span><span class="stat-value" id="s-searches">—</span><span class="stat-label">Searches</span></div>
+        <div class="summary-stat"><span class="stat-icon">🛰️</span><span class="stat-value" id="s-shodan">—</span><span class="stat-label">Shodan</span></div>
         <div class="summary-stat"><span class="stat-icon">🧠</span><span class="stat-value" id="s-model">—</span><span class="stat-label">Model</span></div>
-        <div class="summary-stat"><span class="stat-icon">🔗</span><span class="stat-value" id="s-connections">0</span><span class="stat-label">Connections</span></div>
       </div>
       <div class="terminal-window">
         <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title" id="report-title">swarm-report.md</span></div>
@@ -1382,7 +1465,7 @@ async function loadRuns(){const r=await fetch("/runs");const runs=await r.json()
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 
-async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}renderTab("swarm");loadVessels(rid);fetch("/runs").then(x=>x.json()).then(runs=>{const run=runs.find(x=>x.id===rid);if(run){document.getElementById("s-targets").textContent=run.targets||"?";document.getElementById("s-done").textContent=run.done||"?";document.getElementById("s-failed").textContent=run.failed||"0";document.getElementById("s-duration").textContent=run.status||"—"}});document.getElementById("final-summary").style.display="flex";fetch("/run/"+rid+"/connections").then(x=>x.text()).then(t=>{const pairs=(t.match(/\| [A-Za-z0-9]+ — [A-Za-z0-9]+ \|/g)||[]).length;document.getElementById("s-connections").textContent=pairs})}
+async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}renderTab("swarm");loadVessels(rid);fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{document.getElementById("s-phases").textContent=d.phases||"0";document.getElementById("s-duration").textContent=d.duration||"—";document.getElementById("s-reports").textContent=d.reports||"0";document.getElementById("s-toolcalls").textContent=d.tool_calls||"—";document.getElementById("s-sources").textContent=d.sources||"—";document.getElementById("s-searches").textContent=d.searches||"—";document.getElementById("s-shodan").textContent=d.shodan||"—";document.getElementById("s-model").textContent=d.model||"—"}).catch(()=>{});document.getElementById("final-summary").style.display="flex"}
 
 async function loadVessels(rid){const r=await fetch("/run/"+rid+"/vessels");const v=await r.json();let html="";v.forEach(v=>{html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+v.target+'\',\''+v.files[0]+'\')">🚢 '+v.target.slice(0,12)+'</button>'});document.getElementById("vessel-tabs").innerHTML=html;if(!v.length){document.getElementById("connections").disabled=true}}
 
