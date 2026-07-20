@@ -518,7 +518,7 @@ def _dashboard(args):
         return {}
 
     def _load_models() -> list[str]:
-        """Read available models from Hermes config + provider caches."""
+        """Read available models from Hermes config + known provider caches."""
         models: set[str] = set()
 
         # 1. Main config
@@ -528,13 +528,11 @@ def _dashboard(args):
                 import yaml
                 raw = cfg_path.read_text()
                 cfg = yaml.safe_load(raw) or {}
-                # Default model
                 m = cfg.get("model", {})
                 if isinstance(m, dict):
                     default = m.get("default")
                     if default:
                         models.add(default)
-                # Custom providers
                 for prov in cfg.get("custom_providers", []):
                     if isinstance(prov, dict):
                         for key in ("model", "models"):
@@ -545,51 +543,56 @@ def _dashboard(args):
                                 for v in val:
                                     if v:
                                         models.add(v)
-                # Fallback providers
                 for fb in cfg.get("fallback_providers", []):
                     if isinstance(fb, dict) and fb.get("model"):
                         models.add(fb["model"])
             except Exception:
                 pass
 
-        # 2. Profile-level model caches (OpenRouter, etc.)
+        # 2. API keys from profile .env files → match to provider names in cache
         profile_dir = Path.home() / ".hermes" / "profiles"
-        if profile_dir.exists():
-            for cache_file in profile_dir.rglob("*model*cache*.json"):
-                try:
-                    data = json.loads(cache_file.read_text())
-                    for provider_info in data.values():
-                        prov_models = provider_info.get("models", {})
-                        if isinstance(prov_models, dict):
-                            models.update(prov_models.keys())
-                        elif isinstance(prov_models, list):
-                            for m in prov_models:
-                                if isinstance(m, dict) and m.get("id"):
-                                    models.add(m["id"])
-                except Exception:
-                    pass
-
-        # 3. Profile configs for any model setting
-        for profile_config in profile_dir.rglob("config.yaml"):
-            try:
-                import yaml
-                pc = yaml.safe_load(profile_config.read_text()) or {}
-                for key in ("model", "default_model", "LLM_MODEL"):
-                    val = pc.get(key, pc.get("env", {}).get(key))
-                    if isinstance(val, str) and val and val not in ("''", ""):
-                        models.add(val)
-            except Exception:
-                pass
-
-        # 4. .env files in profiles
+        active_providers: set[str] = set()
         for env_file in profile_dir.rglob(".env"):
             try:
                 for line in env_file.read_text().splitlines():
                     line = line.strip()
-                    if line.startswith("LLM_MODEL=") or line.startswith("HERMES_INFERENCE_MODEL="):
+                    if line.startswith("LLM_MODEL="):
                         val = line.split("=", 1)[1].strip().strip("'\"")
                         if val:
                             models.add(val)
+            except Exception:
+                pass
+
+        # 2b. Map API_KEY env vars to cache provider names
+        api_key_map = {
+            "anthropic": "anthropic", "deepseek": "deepseek",
+            "openai": "openai", "openrouter": "openrouter",
+            "google": "google", "github": "github-copilot",
+            "ollama": "ollama-cloud", "mistral": "mistral",
+            "cohere": "cohere", "groq": "groq", "xai": "xai",
+            "together": "togetherai", "perplexity": "perplexity",
+        }
+        for env_file in profile_dir.rglob(".env"):
+            try:
+                for line in env_file.read_text().splitlines():
+                    line = line.strip()
+                    for key, provider in api_key_map.items():
+                        if line.startswith(key.upper() + "_API_KEY="):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            if val and val != "''":
+                                active_providers.add(provider)
+            except Exception:
+                pass
+
+        # 3. Scan model cache for active providers
+        for cache_file in profile_dir.rglob("*model*cache*.json"):
+            try:
+                data = json.loads(cache_file.read_text())
+                for prov_name, info in data.items():
+                    if prov_name in active_providers:
+                        prov_models = info.get("models", {})
+                        if isinstance(prov_models, dict):
+                            models.update(prov_models.keys())
             except Exception:
                 pass
 
@@ -607,6 +610,10 @@ def _dashboard(args):
             and "voxtral" not in m.lower()
             and "neuphonic" not in m.lower()
         }
+        # Add known model aliases used by the user
+        for alias in ("claude-fable-5",):
+            if alias not in models:
+                models.add(alias)
         return sorted(models)
 
     def _list_runs() -> list[dict]:
