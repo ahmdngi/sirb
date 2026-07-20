@@ -1221,7 +1221,6 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
       <div id="method-mmsi" class="method-panel">
         <div class="form-group" style="display:flex;gap:0.5em;align-items:end;">
           <div style="flex:1"><label>Number of vessels</label><input id="vessel-count" type="number" min="1" max="20" value="2" onchange="buildVesselInputs()" /></div>
-          <button class="btn btn-small" onclick="buildVesselInputs()" style="margin-bottom:2px;">Apply</button>
         </div>
         <div id="vessel-inputs"></div>
       </div>
