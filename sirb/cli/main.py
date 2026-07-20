@@ -624,11 +624,20 @@ def _dashboard(args):
             if not d.is_dir():
                 continue
             ap = d / "assessment.md"
+            tr = d / "tracking.json"
             mtime = d.stat().st_mtime if d.stat() else 0
             info = {"id": d.name, "has_assessment": ap.exists(),
                     "mtime": mtime, "generated_at": ""}
             if ap.exists():
                 info["generated_at"] = datetime.fromtimestamp(mtime).isoformat()
+            elif tr.exists():
+                try:
+                    t = json.loads(tr.read_text())
+                    info["targets"] = len(t.get("targets", []))
+                    info["generated_at"] = t.get("created_at", "")
+                    info["status"] = t.get("status", "running")
+                except Exception:
+                    pass
             out.append(info)
             if len(out) >= 50:
                 break
@@ -737,6 +746,13 @@ def _dashboard(args):
                     task_file = queue_dir / f"{m}-{uuid.uuid4().hex[:8]}.json"
                     task_file.write_text(json.dumps(task))
                 run_id = f"web-{int(time.time())}"
+                # Write tracking entry to Sirb's runs dir
+                rundir = runs_base / run_id
+                rundir.mkdir(parents=True, exist_ok=True)
+                tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "running", "queue_hook": "shipcrawler"}
+                (rundir / "tracking.json").write_text(json.dumps(tracking))
                 with proc_lock:
                     running_procs[run_id] = None
                 self._send_json({"run_id": run_id, "status": "started",
