@@ -698,6 +698,13 @@ def _dashboard(args):
                 self._serve_map_html()
             elif path == "/models":
                 self._send_json(_load_models())
+            elif path == "/api/profiles/models":
+                pm_path = Path(__file__).parent / "profiles-models.json"
+                try:
+                    data = json.loads(pm_path.read_text())
+                    self._send_json(data)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -712,7 +719,7 @@ def _dashboard(args):
             if path == "/run/new":
                 mmsis = params.get("mmsi", [""])[0].strip()
                 mode = params.get("mode", ["fast"])[0].strip()
-                profile = params.get("profile", ["default"])[0].strip()
+                profile = params.get("profile", [""])[0].strip()
                 model = params.get("model", [""])[0].strip()
                 if not mmsis:
                     self._send_json({"error": "No MMSI provided"}, 400)
@@ -732,7 +739,7 @@ def _dashboard(args):
                              "--tasks", tf.name]
                 env = os.environ.copy()
                 env["SIRB_RUN_DIR"] = str(runs_base.parent)
-                if profile and profile != "default":
+                if profile and profile not in ("", "default"):
                     env["SIRB_HERMES_PROFILE"] = profile
                 if model:
                     env["SIRB_HERMES_MODEL"] = model
@@ -774,7 +781,7 @@ def _dashboard(args):
                 lon = params.get("lon", [""])[0].strip()
                 radius = params.get("radius", ["50"])[0].strip()
                 label = params.get("label", [f"{lat},{lon}"])[0].strip()
-                profile = params.get("profile", ["default"])[0].strip()
+                profile = params.get("profile", [""])[0].strip()
                 model = params.get("model", [""])[0].strip()
                 if not lat or not lon:
                     self._send_json({"error": "lat and lon required"}, 400)
@@ -789,7 +796,7 @@ def _dashboard(args):
                 hermes_python = sys.executable
                 env = os.environ.copy()
                 env["SIRB_GEO_TARGETS"] = json.dumps(geo_cfg)
-                if profile and profile != "default":
+                if profile and profile not in ("", "default"):
                     env["SIRB_HERMES_PROFILE"] = profile
                 if model:
                     env["SIRB_HERMES_MODEL"] = model
@@ -813,7 +820,7 @@ def _dashboard(args):
 
             elif path == "/run/port":
                 port_key = params.get("port", [""])[0].strip()
-                profile = params.get("profile", ["default"])[0].strip()
+                profile = params.get("profile", [""])[0].strip()
                 model = params.get("model", [""])[0].strip()
                 if not port_key:
                     self._send_json({"error": "port required"}, 400)
@@ -833,7 +840,7 @@ def _dashboard(args):
                     hermes_python = sys.executable
                     env = os.environ.copy()
                     env["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
-                    if profile and profile != "default":
+                    if profile and profile not in ("", "default"):
                         env["SIRB_HERMES_PROFILE"] = profile
                     if model:
                         env["SIRB_HERMES_MODEL"] = model
@@ -1013,19 +1020,19 @@ th { color: #8b949e; font-weight: 600; }
           <option value="deep">Deep (~10 min)</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Agent Profile</label>
-        <select id="profile-select">
-          <option value="default">default</option>
-          <option value="shipcrawler">shipcrawler</option>
-          <option value="research">research</option>
+      <div class="form-group" style="margin-top:0.6rem;display:flex;gap:0.5rem;align-items:center;">
+        <label style="font-size:0.8rem;color:#58a6ff;white-space:nowrap;font-weight:500;">👤 Agent Profile:</label>
+        <select id="profile-select" style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:6px;padding:0.45rem 0.6rem;font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:#8b949e;outline:none;cursor:pointer;width:auto;min-width:160px;max-width:220px;" onchange="onProfileChange()">
+          <option value="">default</option>
           <option value="local">local</option>
+          <option value="research">research</option>
+          <option value="shipcrawler">shipcrawler</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Model</label>
-        <select id="model-select">
-          <option value="">Loading...</option>
+      <div class="form-group" style="display:flex;gap:0.5rem;align-items:center;">
+        <label style="font-size:0.8rem;color:#58a6ff;white-space:nowrap;font-weight:500;">🧠 Model:</label>
+        <select id="model-select" style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:6px;padding:0.45rem 0.6rem;font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:#8b949e;outline:none;cursor:pointer;width:auto;min-width:180px;max-width:280px;">
+          <option value="">Loading models...</option>
         </select>
       </div>
       <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
@@ -1207,16 +1214,30 @@ async function stopRun() {
 }
 
 // Init
-async function loadModels() {
+async function loadProfileModels(profile) {
   try {
-    const r = await fetch("/models");
-    const models = await r.json();
+    const r = await fetch("/api/profiles/models");
+    const data = await r.json();
+    const profileKey = profile || "";
+    const models = data[profileKey] || [];
     const sel = document.getElementById("model-select");
-    sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join("");
-  } catch(_) {}
+    sel.innerHTML = models.map(m =>
+      `<option value="${m.value}">${m.label}</option>`
+    ).join("");
+    if (!sel.value) sel.selectedIndex = 0;
+  } catch(_) {
+    document.getElementById("model-select").innerHTML =
+      '<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>';
+  }
 }
+
+function onProfileChange() {
+  const profile = document.getElementById("profile-select").value;
+  loadProfileModels(profile);
+}
+
 loadRuns();
-loadModels();
+loadProfileModels("");
 setInterval(loadRuns, 5000);
 </script>
 </body>
