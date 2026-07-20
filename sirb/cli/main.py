@@ -904,341 +904,162 @@ def _dashboard(args):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sirb Dashboard</title>
+<title>Sirb Swarm — Agent OSINT Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; height: 100vh; }
-.sidebar { width: 260px; background: #161b22; border-right: 1px solid #30363d; padding: 1em; overflow-y: auto; flex-shrink: 0; }
-.sidebar h2 { color: #58a6ff; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.5em; }
-.sidebar .run-item { padding: 0.5em; cursor: pointer; border-radius: 4px; margin-bottom: 2px; font-size: 0.85em; }
-.sidebar .run-item:hover { background: #21262d; }
-.sidebar .run-item.active { background: #1f6feb; color: #fff; }
-.sidebar .run-item .date { font-size: 0.75em; color: #8b949e; }
-.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.main .top-bar { padding: 1em; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 1em; }
-.top-bar h1 { font-size: 1.2em; color: #58a6ff; display:flex; align-items:center; gap:8px; }
-.top-bar .brand-logo { height:28px; width:auto; }
-.top-bar #sse-status { font-size: 0.8em; color: #8b949e; margin-left: auto; }
-.content { flex: 1; display: flex; overflow: hidden; }
-.panel { flex: 1; padding: 1em; overflow-y: auto; min-width: 0; }
-.panel-right { width: 340px; padding: 1em; overflow-y: auto; background: #161b22; border-left: 1px solid #30363d; flex-shrink: 0; }
-.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5em; margin-bottom: 1em; }
-.stat-card { background: #21262d; border-radius: 6px; padding: 0.75em; text-align: center; }
-.stat-card .label { font-size: 0.75em; color: #8b949e; }
-.stat-card .value { font-size: 1.3em; font-weight: bold; }
-.critical { color: #f85149; } .high { color: #d29922; } .medium { color: #db6d28; }
-.info { color: #58a6ff; } .success { color: #3fb950; }
-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-th, td { text-align: left; padding: 0.4em 0.5em; border-bottom: 1px solid #21262d; }
-th { color: #8b949e; font-weight: 600; }
-#assessment-view { white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; }
-.form-group { margin-bottom: 0.75em; }
-.form-group label { display: block; font-size: 0.85em; color: #8b949e; margin-bottom: 0.25em; }
-.form-group input, .form-group select { width: 100%; padding: 0.5em; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; }
-.btn { padding: 0.5em 1em; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
-.btn-primary { background: #1f6feb; color: #fff; }
-.btn-primary:hover { background: #388bfd; }
-.btn-danger { background: #da3633; color: #fff; }
-.btn-danger:hover { background: #f85149; }
-#map { height: 300px; border-radius: 6px; margin-top: 0.5em; }
-.log-line { font-family: monospace; font-size: 0.8em; color: #8b949e; white-space: pre-wrap; }
+:root {
+  --bg: #0d1117; --bg-2: #161b22; --bg-3: #1c2333;
+  --border: #30363d; --border-2: #21262d;
+  --text: #c9d1d9; --text-2: #8b949e; --text-3: #6e7681;
+  --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+  --gold: #d29922; --orange: #db6d28; --cyan: #22d3ee;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; }
+::selection { background:var(--accent); color:#fff; }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+.sidebar { width:240px; flex-shrink:0; background:var(--bg-2); border-right:1px solid var(--border); display:flex; flex-direction:column; height:100vh; position:sticky; top:0; }
+.sidebar-header { padding:1em; border-bottom:1px solid var(--border); }
+.sidebar-header h2 { font-size:0.75em; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-2); font-weight:600; }
+.sidebar-list { flex:1; overflow-y:auto; padding:0.5em; }
+.run-item { padding:0.55em 0.65em; margin-bottom:0.25em; border-radius:6px; cursor:pointer; font-size:0.82em; transition:background 0.15s,border-left 0.15s; border-left:3px solid transparent; }
+.run-item:hover { background:var(--bg-3); }
+.run-item.active { background:var(--bg-3); border-left-color:var(--accent); }
+.run-item .date { font-size:0.7em; color:var(--text-3); }
+.run-empty { padding:1.5em 0; text-align:center; color:var(--text-3); font-size:0.78em; }
+.main { flex:1; display:flex; flex-direction:column; min-width:0; }
+nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
+nav .brand { font-size:1.1em; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
+nav .brand-logo { height:26px; width:auto; }
+nav .brand span { color:var(--accent); }
+nav .selected-run { font-size:0.82em; color:var(--text-2); font-family:'JetBrains Mono',monospace; }
+nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em; }
+.sse-status { font-size:0.7em; display:inline-flex; align-items:center; gap:4px; color:var(--green); }
+.sse-status::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--green); display:inline-block; }
+.sse-status.disconnected { color:var(--red); }
+.sse-status.disconnected::before { background:var(--red); }
+.content { flex:1; display:flex; overflow:hidden; }
+.panel { flex:1; padding:1.5em; overflow-y:auto; }
+.terminal-window { background:var(--bg-2); border:1px solid var(--border); border-radius:10px; overflow:hidden; font-family:'JetBrains Mono',monospace; min-height:200px; }
+.terminal-titlebar { display:flex; align-items:center; gap:0.65rem; padding:0.5rem 0.85rem; background:var(--bg-3); border-bottom:1px solid var(--border); font-size:0.72rem; user-select:none; }
+.terminal-dots { display:flex; gap:5px; }
+.terminal-dots span { width:9px; height:9px; border-radius:50%; display:inline-block; }
+.tdot-red { background:#ff5f56; }
+.tdot-yellow { background:#ffbd2e; }
+.tdot-green { background:#27c93f; }
+.terminal-title { color:var(--text-3); font-size:0.72rem; position:absolute; left:50%; transform:translateX(-50%); }
+.terminal-body { padding:0.85rem; max-height:500px; overflow-y:auto; font-size:0.82rem; line-height:1.6; scroll-behavior:smooth; white-space:pre-wrap; word-break:break-word; }
+.stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:0.5em; margin-bottom:1em; }
+.stat-card { background:var(--bg-2); border:1px solid var(--border); border-radius:6px; padding:0.75em; text-align:center; }
+.stat-card .label { font-size:0.7em; color:var(--text-2); text-transform:uppercase; letter-spacing:0.04em; }
+.stat-card .value { font-size:1.2em; font-weight:700; margin-top:0.15em; }
+.panel-right { width:340px; padding:1.25em; overflow-y:auto; background:var(--bg-2); border-left:1px solid var(--border); flex-shrink:0; }
+.panel-right h3 { font-size:0.85em; font-weight:600; display:flex; align-items:center; gap:0.5em; margin-bottom:1em; color:var(--text); }
+.hero-badge { display:inline-flex; align-items:center; gap:0.4rem; background:rgba(88,166,255,0.08); border:1px solid rgba(88,166,255,0.2); border-radius:999px; padding:0.25rem 0.85rem; font-size:0.7rem; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.75rem; }
+.live-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green); animation:pulse-dot 1.5s ease-in-out infinite; }
+@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.85)} }
+.form-group { margin-bottom:0.75em; }
+.form-group label { display:block; font-size:0.8em; color:var(--text-2); margin-bottom:0.25em; font-weight:500; }
+.form-group input,.form-group select { width:100%; padding:0.5em 0.65em; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:inherit; font-size:0.85em; outline:none; transition:border-color 0.2s,box-shadow 0.2s; }
+.form-group input:focus,.form-group select:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(88,166,255,0.15); }
+.btn { padding:0.5em 1em; border:none; border-radius:6px; cursor:pointer; font-size:0.85em; font-weight:600; font-family:inherit; transition:opacity 0.2s,transform 0.1s; }
+.btn:active { transform:scale(0.97); }
+.btn-primary { background:#1f6feb; color:#fff; }
+.btn-primary:hover { background:#388bfd; }
+.btn-danger { background:#da3633; color:#fff; }
+.btn-danger:hover { background:#f85149; }
+.btn:disabled { opacity:0.5; cursor:not-allowed; }
+.btn-row { display:flex; gap:0.5em; margin-top:0.5em; }
+.method-panel { margin-bottom:0.5em; padding:0.5em; background:var(--bg-3); border-radius:6px; }
+.method-panel .form-group { margin:0; }
+.method-panel input,.method-panel select { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:0.4em 0.6em; color:var(--text); font-size:0.82em; font-family:'JetBrains Mono',monospace; outline:none; }
+.method-panel input:focus { border-color:var(--accent); }
+#map { height:250px; border-radius:6px; margin-top:0.5em; border:1px solid var(--border); }
+.phase-line { padding:0.2rem 0; opacity:0; animation:phase-appear 0.25s ease forwards; }
+@keyframes phase-appear { from{opacity:0;transform:translateY(-3px)} to{opacity:1;transform:translateY(0)} }
+.phase-complete { color:var(--green); }
+.phase-error { color:var(--red); }
+.phase-info { color:var(--accent); }
+.phase-verbose { color:var(--text-3); font-size:0.75em; }
+.final-summary { max-width:100%; margin-top:1em; display:flex; justify-content:center; gap:0.75rem; flex-wrap:nowrap; padding:0.6rem 0.8rem; background:var(--bg-3); border:1px solid var(--border); border-radius:8px; animation:fadeInUp 0.4s ease; overflow-x:auto; }
+.summary-stat { text-align:center; display:flex; flex-direction:column; align-items:center; gap:0.1rem; }
+.stat-icon { font-size:0.85rem; opacity:0.7; }
+.stat-val { font-size:1.1rem; font-weight:bold; color:var(--accent); }
+.stat-lbl { font-size:0.65rem; color:var(--text-2); text-transform:uppercase; letter-spacing:0.04em; }
+@keyframes fadeInUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+.fade-in-up { animation:fadeInUp 0.4s ease; }
+.pulse-amber { animation:pulse-amber 2s ease-in-out infinite; }
+@keyframes pulse-amber { 0%,100%{background:rgba(210,153,34,0.2);border-color:var(--gold)} 50%{background:rgba(210,153,34,0.05);border-color:transparent} }
+.log-line { font-family:'JetBrains Mono',monospace; font-size:0.8em; color:var(--text-3); white-space:pre-wrap; }
+@media (max-width:900px) { .sidebar{display:none} .panel-right{width:280px} .stat-grid{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:600px) { .content{flex-direction:column} .panel-right{width:100%;border-left:none;border-top:1px solid var(--border)} nav{padding:0.6em 1em;flex-wrap:wrap} nav .selected-run{display:none} }
 </style>
 </head>
 <body>
-<div class="sidebar" id="sidebar">
-  <h2>Runs</h2>
-  <div id="run-list"></div>
+<div class="sidebar">
+  <div class="sidebar-header"><h2>Run History</h2></div>
+  <div class="sidebar-list" id="run-list"><div class="run-empty">No runs yet</div></div>
 </div>
 <div class="main">
-  <div class="top-bar">
-    <h1><img src="/logo" class="brand-logo" alt="Sirb"> Sirb Swarm</h1>
-    <span id="selected-run">No run selected</span>
-    <span id="sse-status">connected</span>
-  </div>
+  <nav>
+    <div class="brand"><img src="/logo" class="brand-logo" alt="Sirb"><span>Sirb</span> Swarm</div>
+    <span class="selected-run" id="selected-run">No run selected</span>
+    <div class="nav-right"><span class="sse-status" id="sse-status">connected</span></div>
+  </nav>
   <div class="content">
-    <div class="panel" id="center-panel">
+    <div class="panel">
       <div id="live-stats" class="stat-grid"></div>
-      <div id="assessment-view">Select a run to view its assessment.</div>
+      <div class="terminal-window">
+        <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title">assessment.md</span></div>
+        <div class="terminal-body" id="assessment-view"><span style="color:var(--text-3)">Select a run to view its assessment.</span></div>
+      </div>
     </div>
-    <div class="panel-right" id="right-panel">
-      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Launch Scan</h3>
-
-      <div class="form-group">
-        <label>Method</label>
-        <select id="method-select" onchange="toggleMethod()">
-          <option value="mmsi">Direct MMSI</option>
-          <option value="port">Port Scan</option>
-          <option value="geo">Geo Location</option>
-        </select>
-      </div>
-
-      <!-- Direct MMSI -->
-      <div id="method-mmsi" class="method-panel">
-        <div class="form-group">
-          <label>MMSI(s) — space or comma separated</label>
-          <input id="mmsi-input" placeholder="273342890 311000987" />
-        </div>
-      </div>
-
-      <!-- Port Scan -->
-      <div id="method-port" class="method-panel" style="display:none">
-        <div class="form-group">
-          <label>Port</label>
-          <select id="port-select">
-            <option value="tallinn">Tallinn</option>
-            <option value="helsinki">Helsinki</option>
-          </select>
-        </div>
-      </div>
-
-      <!-- Geo Location -->
+    <div class="panel-right">
+      <h3><span style="color:var(--accent)">▶</span> Launch Scan</h3>
+      <div class="hero-badge"><span class="live-dot"></span> SIRB v0.3</div>
+      <div class="form-group"><label>Method</label><select id="method-select" onchange="toggleMethod()"><option value="mmsi">Direct MMSI</option><option value="port">Port Scan</option><option value="geo">Geo Location</option></select></div>
+      <div id="method-mmsi" class="method-panel"><div class="form-group"><label>MMSI(s) — space or comma separated</label><input id="mmsi-input" placeholder="273342890 311000987" /></div></div>
+      <div id="method-port" class="method-panel" style="display:none"><div class="form-group"><label>Port</label><select id="port-select"><option value="tallinn">Tallinn</option><option value="helsinki">Helsinki</option></select></div></div>
       <div id="method-geo" class="method-panel" style="display:none">
-        <div class="form-group">
-          <label>Latitude</label>
-          <input id="geo-lat" placeholder="59.5" />
-        </div>
-        <div class="form-group">
-          <label>Longitude</label>
-          <input id="geo-lon" placeholder="24.5" />
-        </div>
-        <div class="form-group">
-          <label>Radius (km)</label>
-          <input id="geo-radius" placeholder="50" value="50" />
-        </div>
-        <div class="form-group">
-          <label>Label (optional)</label>
-          <input id="geo-label" placeholder="Tallinn Bay" />
-        </div>
+        <div class="form-group"><label>Latitude</label><input id="geo-lat" placeholder="59.5" /></div>
+        <div class="form-group"><label>Longitude</label><input id="geo-lon" placeholder="24.5" /></div>
+        <div style="display:flex;gap:0.5em;"><div class="form-group" style="flex:1"><label>Radius (km)</label><input id="geo-radius" placeholder="50" value="50" /></div><div class="form-group" style="flex:1"><label>Label</label><input id="geo-label" placeholder="Tallinn Bay" /></div></div>
       </div>
-
-      <div class="form-group">
-        <label>Mode</label>
-        <select id="mode-select">
-          <option value="fast">Fast (~2 min)</option>
-          <option value="deep">Deep (~10 min)</option>
-        </select>
-      </div>
-      <div class="form-group" style="margin-top:0.6rem;display:flex;gap:0.5rem;align-items:center;">
-        <label style="font-size:0.8rem;color:#58a6ff;white-space:nowrap;font-weight:500;">👤 Agent Profile:</label>
-        <select id="profile-select" style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:6px;padding:0.45rem 0.6rem;font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:#8b949e;outline:none;cursor:pointer;width:auto;min-width:160px;max-width:220px;" onchange="onProfileChange()">
-          <option value="">default</option>
-          <option value="local">local</option>
-          <option value="research">research</option>
-          <option value="shipcrawler">shipcrawler</option>
-        </select>
-      </div>
-      <div class="form-group" style="display:flex;gap:0.5rem;align-items:center;">
-        <label style="font-size:0.8rem;color:#58a6ff;white-space:nowrap;font-weight:500;">🧠 Model:</label>
-        <select id="model-select" style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:6px;padding:0.45rem 0.6rem;font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:#8b949e;outline:none;cursor:pointer;width:auto;min-width:180px;max-width:280px;">
-          <option value="">Loading models...</option>
-        </select>
-      </div>
-      <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
-      <button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button>
-      <hr style="border-color:#30363d;margin:1em 0;" />
-      <h3 style="color:#58a6ff;margin-bottom:0.5em;">Vessel Positions</h3>
+      <div class="form-group"><label>Mode</label><select id="mode-select"><option value="fast">Fast (~2 min)</option><option value="deep">Deep (~10 min)</option></select></div>
+      <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.6em;"><label style="font-size:0.75rem;color:#58a6ff;white-space:nowrap;font-weight:500;">👤 Profile:</label><select id="profile-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:auto;min-width:140px;" onchange="onProfileChange()"><option value="">default</option><option value="local">local</option><option value="research">research</option><option value="shipcrawler">shipcrawler</option></select></div>
+      <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.6em;"><label style="font-size:0.75rem;color:#58a6ff;white-space:nowrap;font-weight:500;">🧠 Model:</label><select id="model-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:auto;min-width:170px;max-width:260px;"><option value="">Loading models...</option></select></div>
+      <div class="btn-row"><button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button><button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button></div>
+      <hr style="border-color:var(--border);margin:1em 0;" />
+      <h4 style="font-size:0.8em;color:var(--text-2);margin-bottom:0.5em;">Vessel Positions</h4>
       <div id="map"></div>
-      <div id="positions-info" style="font-size:0.8em;color:#8b949e;margin-top:0.5em;"></div>
     </div>
   </div>
 </div>
 <script>
-let currentRunId = null;
-let currentRunFromList = null;
-let map = null;
-let markers = [];
-const evt = new EventSource("/events");
-const sseStatus = document.getElementById("sse-status");
-
-evt.onopen = () => sseStatus.textContent = "connected";
-evt.onerror = () => sseStatus.textContent = "disconnected";
-evt.onmessage = (e) => {
-  try {
-    const d = JSON.parse(e.data);
-    if (d.type === "stats" && d.run_id === (currentRunFromList || currentRunId)) {
-      renderStats(d.data);
-    }
-  } catch(e) {}
-};
-
-function renderStats(data) {
-  const el = document.getElementById("live-stats");
-  const cards = [
-    {label:"Progress", value:data.Progress, cls:""},
-    {label:"Completed", value:data.Completed, cls:"success"},
-    {label:"Pending", value:data.Pending, cls:"info"},
-    {label:"Running", value:data.Running, cls:"high"},
-    {label:"Failed", value:data.Failed, cls:"critical"},
-    {label:"Total", value:data.Total, cls:""},
-  ];
-  el.innerHTML = cards.map(c => `<div class="stat-card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`).join("");
-}
-
-async function loadRuns() {
-  const r = await fetch("/runs");
-  const runs = await r.json();
-  const el = document.getElementById("run-list");
-  el.innerHTML = runs.map(r => {
-    const dt = r.generated_at || new Date(r.mtime*1000).toLocaleString();
-    return `<div class="run-item" onclick="selectRun('${r.id}')" id="ri-${r.id}">
-      <div style="font-weight:${r.has_assessment?'bold':'normal'}">${r.id.slice(0,16)}</div>
-      <div class="date">${dt}${r.targets ? ' · '+r.targets+' targets' : ''}</div>
-    </div>`;
-  }).join("");
-}
-
-async function selectRun(rid) {
-  currentRunFromList = rid;
-  document.querySelectorAll(".run-item").forEach(el => el.classList.remove("active"));
-  const el = document.getElementById("ri-" + rid);
-  if (el) el.classList.add("active");
-  document.getElementById("selected-run").textContent = rid;
-
-  // Load assessment
-  const r = await fetch("/run/" + rid + "/assessment");
-  const html = await r.text();
-  document.getElementById("assessment-view").innerHTML = html;
-
-  // Load positions
-  loadPositions(rid);
-
-  // Try stats
-  const sr = await fetch("/run/" + rid + "/json");
-  try {
-    const sj = await sr.json();
-    renderStats({
-      Progress: sj.unique_targets + " targets",
-      Completed: sj.unique_targets || 0,
-      Pending: 0, Running: 0, Failed: 0,
-      Total: sj.unique_targets || 0,
-    });
-  } catch(e) {}
-}
-
-async function loadPositions(rid) {
-  const r = await fetch("/run/" + (rid || "") + "/positions");
-  const pts = await r.json();
-  const info = document.getElementById("positions-info");
-  if (!pts.length) { info.textContent = "No vessel positions found."; return; }
-  info.textContent = pts.length + " vessel(s) positioned";
-  if (!map) {
-    map = L.map("map").setView([59.5, 24.5], 5);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:18}).addTo(map);
-  }
-  markers.forEach(m => map.removeLayer(m));
-  markers = [];
-  pts.forEach(p => {
-    const m = L.circleMarker([p.lat, p.lon], {radius:6, color:"#f85149", fillColor:"#f85149", fillOpacity:0.8})
-      .addTo(map)
-      .bindPopup(`<b>${p.target_id}</b><br/>Dest: ${p.destination}`);
-    markers.push(m);
-  });
-  if (pts.length) map.fitBounds(markers.map(m => m.getLatLng()), {padding:[30,30]});
-}
-
-async function launchRun() {
-  const method = document.getElementById("method-select").value;
-  const profile = document.getElementById("profile-select").value;
-  const model = document.getElementById("model-select").value;
-
-  if (method === "mmsi") {
-    const mmsi = document.getElementById("mmsi-input").value.trim();
-    const mode = document.getElementById("mode-select").value;
-    if (!mmsi) { alert("Enter at least one MMSI"); return; }
-    const r = await fetch("/run/new", {
-      method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "mmsi=" + encodeURIComponent(mmsi) + "&mode=" + encodeURIComponent(mode) + "&profile=" + encodeURIComponent(profile) + "&model=" + encodeURIComponent(model),
-    });
-    handleLaunchResponse(r);
-  }
-  else if (method === "port") {
-    const port = document.getElementById("port-select").value;
-    const mode = document.getElementById("mode-select").value;
-    const r = await fetch("/run/port", {
-      method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "port=" + encodeURIComponent(port) + "&mode=" + encodeURIComponent(mode) + "&profile=" + encodeURIComponent(profile) + "&model=" + encodeURIComponent(model),
-    });
-    handleLaunchResponse(r);
-  }
-  else if (method === "geo") {
-    const lat = document.getElementById("geo-lat").value.trim();
-    const lon = document.getElementById("geo-lon").value.trim();
-    const radius = document.getElementById("geo-radius").value.trim() || "50";
-    const label = document.getElementById("geo-label").value.trim() || (lat + "," + lon);
-    if (!lat || !lon) { alert("Enter latitude and longitude"); return; }
-    const r = await fetch("/run/geo", {
-      method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
-          + "&radius=" + encodeURIComponent(radius) + "&label=" + encodeURIComponent(label)
-          + "&profile=" + encodeURIComponent(profile) + "&model=" + encodeURIComponent(model),
-    });
-    handleLaunchResponse(r);
-  }
-}
-
-async function handleLaunchResponse(responsePromise) {
-  document.getElementById("run-btn").disabled = true;
-  document.getElementById("run-btn").textContent = "Running...";
-  document.getElementById("stop-btn").style.display = "inline-block";
-  try {
-    const r = await responsePromise;
-    const d = await r.json();
-    if (d.run_id) {
-      currentRunId = d.run_id;
-      document.getElementById("selected-run").textContent = "Running: " + d.run_id;
-      document.getElementById("assessment-view").textContent = "Run launched. Waiting for checkpoint data...";
-    } else if (d.error) { alert("Error: " + d.error); }
-  } catch(e) { alert("Failed: " + e); }
-  document.getElementById("run-btn").disabled = false;
-  document.getElementById("run-btn").textContent = "▶ Run";
-}
-
-function toggleMethod() {
-  const m = document.getElementById("method-select").value;
-  document.getElementById("method-mmsi").style.display = m === "mmsi" ? "" : "none";
-  document.getElementById("method-port").style.display = m === "port" ? "" : "none";
-  document.getElementById("method-geo").style.display = m === "geo" ? "" : "none";
-}
-
-async function stopRun() {
-  if (!currentRunId) return;
-  await fetch("/run/" + currentRunId + "/stop", {method:"POST"});
-  document.getElementById("stop-btn").style.display = "none";
-  document.getElementById("selected-run").textContent = "Stopped: " + currentRunId;
-  setTimeout(loadRuns, 1000);
-}
-
-// Init
-async function loadProfileModels(profile) {
-  try {
-    const r = await fetch("/api/profiles/models");
-    const data = await r.json();
-    const profileKey = profile || "";
-    const models = data[profileKey] || [];
-    const sel = document.getElementById("model-select");
-    sel.innerHTML = models.map(m =>
-      `<option value="${m.value}">${m.label}</option>`
-    ).join("");
-    if (!sel.value) sel.selectedIndex = 0;
-  } catch(_) {
-    document.getElementById("model-select").innerHTML =
-      '<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>';
-  }
-}
-
-function onProfileChange() {
-  const profile = document.getElementById("profile-select").value;
-  loadProfileModels(profile);
-}
-
-loadRuns();
-loadProfileModels("");
-setInterval(loadRuns, 5000);
+let currentRunId=null,map=null,markers=[];
+const sseEl=document.getElementById("sse-status"),evtSource=new EventSource("/events");
+evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status";};
+evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
+evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.data)liveStats(d.data)}catch(_){}};
+function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}}
+async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
+async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");const r=await fetch("/run/"+rid+"/assessment");const t=await r.text();document.getElementById("assessment-view").innerHTML=t?t.replace(/\n/g,"<br>"):'<span style="color:var(--text-3)">Assessment not ready yet.</span>';loadPositions(rid)}
+async function loadPositions(rid){const r=await fetch("/run/"+rid+"/positions");const pts=await r.json();if(!map)return;markers.forEach(m=>map.removeLayer(m));markers=[];if(!pts.length)return;pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:6,color:"#f85149",fillColor:"#f85149",fillOpacity:0.8}).addTo(map).bindPopup("<b>"+p.target_id+"</b><br/>Dest: "+p.destination);markers.push(m)});if(pts.length)map.fitBounds(markers.map(m=>m.getLatLng()),{padding:[30,30]})}
+function initMap(){if(!document.getElementById("map"))return;map=L.map("map",{zoomControl:true,attributionControl:false}).setView([59.5,24.5],3);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(map)}
+initMap();
+async function launchRun(){const method=document.getElementById("method-select").value;const profile=document.getElementById("profile-select").value;const model=document.getElementById("model-select").value;if(method==="mmsi"){const mmsi=document.getElementById("mmsi-input").value.trim();const mode=document.getElementById("mode-select").value;if(!mmsi){alert("Enter at least one MMSI");return}const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"mmsi="+encodeURIComponent(mmsi)+"&mode="+encodeURIComponent(mode)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}else if(method==="port"){const port=document.getElementById("port-select").value;const mode=document.getElementById("mode-select").value;const r=await fetch("/run/port",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"port="+encodeURIComponent(port)+"&mode="+encodeURIComponent(mode)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}else if(method==="geo"){const lat=document.getElementById("geo-lat").value.trim();const lon=document.getElementById("geo-lon").value.trim();const radius=document.getElementById("geo-radius").value.trim()||"50";const label=document.getElementById("geo-label").value.trim()||(lat+","+lon);if(!lat||!lon){alert("Enter latitude and longitude");return}const r=await fetch("/run/geo",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"lat="+encodeURIComponent(lat)+"&lon="+encodeURIComponent(lon)+"&radius="+encodeURIComponent(radius)+"&label="+encodeURIComponent(label)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}}
+async function handleLaunchResponse(p){document.getElementById("run-btn").disabled=true;document.getElementById("run-btn").textContent="Running...";document.getElementById("stop-btn").style.display="inline-block";try{const r=await p;const d=await r.json();if(d.run_id){currentRunId=d.run_id;document.getElementById("selected-run").textContent="Run: "+d.run_id;document.getElementById("assessment-view").innerHTML='<span style="color:var(--accent)">⏳ Run started...</span>';setTimeout(loadRuns,1000)}else if(d.error){alert("Error: "+d.error)}}catch(e){alert("Failed: "+e)}document.getElementById("run-btn").disabled=false;document.getElementById("run-btn").textContent="▶ Run"}
+function toggleMethod(){const m=document.getElementById("method-select").value;document.getElementById("method-mmsi").style.display=m==="mmsi"?"":"none";document.getElementById("method-port").style.display=m==="port"?"":"none";document.getElementById("method-geo").style.display=m==="geo"?"":"none"}
+async function stopRun(){if(!currentRunId)return;await fetch("/run/"+currentRunId+"/stop",{method:"POST"});document.getElementById("stop-btn").style.display="none";document.getElementById("selected-run").textContent="Stopped: "+currentRunId;setTimeout(loadRuns,1000)}
+async function loadProfileModels(profile){try{const r=await fetch("/api/profiles/models");const data=await r.json();const pk=profile||"";const ms=data[pk]||[];const sel=document.getElementById("model-select");sel.innerHTML=ms.map(m=>'<option value="'+m.value+'">'+m.label+"</option>").join("");if(!sel.value)sel.selectedIndex=0}catch(_){document.getElementById("model-select").innerHTML='<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>'}}
+function onProfileChange(){const p=document.getElementById("profile-select").value;loadProfileModels(p)}
+loadRuns();loadProfileModels("");setInterval(loadRuns,5000);
 </script>
 </body>
 </html>"""
