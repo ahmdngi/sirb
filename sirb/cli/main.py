@@ -762,6 +762,33 @@ def _dashboard(args):
                     self._send_html(cp.read_text())
                 else:
                     self._send_html("<p>Connections analysis not ready yet.</p>")
+            elif path.startswith("/run/") and "/vessel/" in path and path.endswith(".md"):
+                # /run/{rid}/vessel/{target}/{filename}.md
+                parts = path.split("/")
+                rid = parts[2]
+                target = parts[4]
+                filename = parts[5]
+                fp = runs_base / rid / "vessels" / target / filename
+                if fp.exists():
+                    self._send_html(fp.read_text())
+                else:
+                    self._send_html("<p>File not found.</p>", 404)
+            elif re.match(r"^/run/[^/]+/vessels$", path):
+                rid = path.split("/")[2]
+                vdir = runs_base / rid / "vessels"
+                if vdir.exists():
+                    vessels = []
+                    for v in sorted(vdir.iterdir()):
+                        if v.is_dir():
+                            files = sorted(f.name for f in v.iterdir() if f.suffix in (".md", ".log", ".txt"))
+                            if files:
+                                vessels.append({"target": v.name, "files": files})
+                        elif v.suffix in (".log", ".txt", ".md"):
+                            # Also include flat log files
+                            pass
+                    self._send_json(vessels)
+                else:
+                    self._send_json([])
             elif path.startswith("/run/") and path.endswith("/positions"):
                 rid = path.split("/")[2]
                 self._send_json(_vessel_positions(rid))
@@ -1051,6 +1078,7 @@ def _dashboard(args):
 <title>Sirb Swarm — Agent OSINT Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1087,6 +1115,12 @@ body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color
 .run-item:hover .sidebar-delete { opacity:1; }
 .sidebar-delete:hover { color:var(--red) !important; background:rgba(248,81,73,0.1); }
 .run-empty { padding:1.5em 0; text-align:center; color:var(--text-3); font-size:0.78em; }
+.tab-btn { background:none;border:none;color:var(--text-3);font-size:0.75em;padding:0.4em 0.7em;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;transition:color 0.15s,border-color 0.15s; }
+.tab-btn:hover { color:var(--text-1); }
+.tab-btn.active { color:var(--accent);border-bottom-color:var(--accent); }
+.vessel-btn { background:none;border:none;color:var(--text-3);font-size:0.72em;padding:0.3em 0.5em;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;transition:color 0.15s,border-color 0.15s; }
+.vessel-btn:hover { color:var(--text-1); }
+.vessel-btn.active { color:var(--green);border-bottom-color:var(--green); }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; }
 nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
 nav .brand { font-size:1.1em; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
@@ -1169,8 +1203,13 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
   <div class="content">
     <div class="panel">
       <div id="live-stats" class="stat-grid"></div>
+      <div id="report-tabs" style="display:none;border-bottom:1px solid var(--border);margin-bottom:0.5em;">
+        <button class="tab-btn active" data-tab="swarm" onclick="switchTab('swarm')">📋 Swarm</button>
+        <button class="tab-btn" data-tab="connections" onclick="switchTab('connections')">🔗 Connections</button>
+        <span id="vessel-tabs"></span>
+      </div>
       <div class="terminal-window">
-        <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title">assessment.md</span></div>
+        <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title" id="report-title">swarm-report.md</span></div>
         <div class="terminal-body" id="assessment-view"><span style="color:var(--text-3)">Select a run to view its assessment.</span></div>
       </div>
     </div>
@@ -1196,7 +1235,7 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
   </div>
 </div>
 <script>
-let currentRunId=null,map=null,markers=[];
+let currentRunId=null,map=null,markers=[],reportCache={};
 const sseEl=document.getElementById("sse-status"),evtSource=new EventSource("/events");
 evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status";};
 evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
@@ -1204,8 +1243,17 @@ evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.
 function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}}
 async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
 
-async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its assessment.</span>'}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
-async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");const r=await fetch("/run/"+rid+"/report");const t=await r.text();document.getElementById("assessment-view").innerHTML=t.includes("Report not ready")?'<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>':t.replace(/\n/g,"<br>");loadPositions(rid)}
+async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
+
+async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";return}renderTab("swarm");loadVessels(rid)}
+
+async function loadVessels(rid){const r=await fetch("/run/"+rid+"/vessels");const v=await r.json();let html="";v.forEach(v=>{html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+v.target+'\',\''+v.files[0]+'\')">🚢 '+v.target.slice(0,12)+'</button>'});document.getElementById("vessel-tabs").innerHTML=html;if(!v.length){document.getElementById("connections").disabled=true}}
+
+async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML=marked.parse(text)}
+
+function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab==="swarm"){document.querySelector('[data-tab="swarm"]').classList.add("active");renderTab("swarm")}else if(tab==="connections"){document.querySelector('[data-tab="connections"]').classList.add("active");renderTab("connections")}else{document.getElementById("vessel-tabs").querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
+
+function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab==="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}else if(tab==="connections"){document.getElementById("report-title").textContent="connections.md"}if(content){view.innerHTML=marked.parse(content)}else if(tab==="swarm"){view.innerHTML='<span style="color:var(--text-3)">Loading swarm report...</span>'}else if(tab==="connections"){view.innerHTML='<span style="color:var(--text-3)">⏳ Connections analysis not ready yet.</span>'}}
 async function loadPositions(rid){const r=await fetch("/run/"+rid+"/positions");const pts=await r.json();if(!map)return;markers.forEach(m=>map.removeLayer(m));markers=[];if(!pts.length)return;pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:6,color:"#f85149",fillColor:"#f85149",fillOpacity:0.8}).addTo(map).bindPopup("<b>"+p.target_id+"</b><br/>Dest: "+p.destination);markers.push(m)});if(pts.length)map.fitBounds(markers.map(m=>m.getLatLng()),{padding:[30,30]})}
 function initMap(){if(!document.getElementById("map"))return;map=L.map("map",{zoomControl:true,attributionControl:false}).setView([59.5,24.5],3);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(map)}
 initMap();
