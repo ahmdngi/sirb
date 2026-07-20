@@ -621,7 +621,7 @@ def _dashboard(args):
         if not report_base.exists():
             return []
         out = []
-        for d in sorted(report_base.iterdir(), reverse=True):
+        for d in sorted(report_base.iterdir(), key=os.path.getmtime, reverse=True):
             if not d.is_dir():
                 continue
             if d.name in ("dashboards",):
