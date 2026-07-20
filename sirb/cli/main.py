@@ -1579,7 +1579,7 @@ initMap();
                     return {"Targets": total,
                             "Status": t.get("status", "unknown"),
                             "Mode": t.get("mode", "?"),
-                            "Agents done": f"{done}/{total}" if agents else "queued",
+                            "Agents done": f"{done}/{total}" if done or total > 0 else "queued",
                             "Failed": failed}
                 except Exception:
                     return None
