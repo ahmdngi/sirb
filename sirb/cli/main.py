@@ -517,6 +517,47 @@ def _dashboard(args):
             return json.loads(sjp.read_text())
         return {}
 
+    def _load_models() -> list[str]:
+        """Read available models from Hermes config."""
+        cfg_path = Path.home() / ".hermes" / "config.yaml"
+        if not cfg_path.exists():
+            return [__import__('os').environ.get('HERMES_INFERENCE_MODEL', 'deepseek-v4-flash')]
+        try:
+            import yaml
+            raw = cfg_path.read_text()
+            cfg = yaml.safe_load(raw) or {}
+            models = set()
+            # Default model
+            m = cfg.get("model", {})
+            if isinstance(m, dict):
+                default = m.get("default")
+                if default:
+                    models.add(default)
+            # Custom providers
+            for prov in cfg.get("custom_providers", []):
+                if isinstance(prov, dict):
+                    for key in ("model", "models"):
+                        val = prov.get(key)
+                        if isinstance(val, str) and val:
+                            models.add(val)
+                        elif isinstance(val, list):
+                            for v in val:
+                                if v:
+                                    models.add(v)
+            # Fallback providers
+            for fb in cfg.get("fallback_providers", []):
+                if isinstance(fb, dict) and fb.get("model"):
+                    models.add(fb["model"])
+            # TTS / STT models
+            for section in ("tts", "stt", "voice"):
+                sec = cfg.get(section, {})
+                for sub in sec.values() if isinstance(sec, dict) else []:
+                    if isinstance(sub, dict) and sub.get("model"):
+                        models.add(sub["model"])
+            return sorted(models) if models else ["deepseek-v4-flash"]
+        except Exception:
+            return [cfg.get("model", {}).get("default", "deepseek-v4-flash")]
+
     def _list_runs() -> list[dict]:
         if not runs_base.exists():
             return []
@@ -597,6 +638,8 @@ def _dashboard(args):
                 self._send_json(_vessel_positions(rid))
             elif path == "/map":
                 self._serve_map_html()
+            elif path == "/models":
+                self._send_json(_load_models())
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -924,9 +967,7 @@ th { color: #8b949e; font-weight: 600; }
       <div class="form-group">
         <label>Model</label>
         <select id="model-select">
-          <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-          <option value="anthropic/claude-sonnet-4">claude-sonnet-4</option>
-          <option value="openai/gpt-4o">gpt-4o</option>
+          <option value="">Loading...</option>
         </select>
       </div>
       <button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button>
@@ -1108,7 +1149,16 @@ async function stopRun() {
 }
 
 // Init
+async function loadModels() {
+  try {
+    const r = await fetch("/models");
+    const models = await r.json();
+    const sel = document.getElementById("model-select");
+    sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join("");
+  } catch(_) {}
+}
 loadRuns();
+loadModels();
 setInterval(loadRuns, 5000);
 </script>
 </body>
