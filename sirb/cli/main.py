@@ -518,48 +518,96 @@ def _dashboard(args):
         return {}
 
     def _load_models() -> list[str]:
-        """Read available models from Hermes config."""
+        """Read available models from Hermes config + provider caches."""
+        models: set[str] = set()
+
+        # 1. Main config
         cfg_path = Path.home() / ".hermes" / "config.yaml"
-        if not cfg_path.exists():
-            return [__import__('os').environ.get('HERMES_INFERENCE_MODEL', 'deepseek-v4-flash')]
-        try:
-            import yaml
-            raw = cfg_path.read_text()
-            cfg = yaml.safe_load(raw) or {}
-            models = set()
-            # Default model
-            m = cfg.get("model", {})
-            if isinstance(m, dict):
-                default = m.get("default")
-                if default:
-                    models.add(default)
-            # Custom providers
-            for prov in cfg.get("custom_providers", []):
-                if isinstance(prov, dict):
-                    for key in ("model", "models"):
-                        val = prov.get(key)
-                        if isinstance(val, str) and val:
+        if cfg_path.exists():
+            try:
+                import yaml
+                raw = cfg_path.read_text()
+                cfg = yaml.safe_load(raw) or {}
+                # Default model
+                m = cfg.get("model", {})
+                if isinstance(m, dict):
+                    default = m.get("default")
+                    if default:
+                        models.add(default)
+                # Custom providers
+                for prov in cfg.get("custom_providers", []):
+                    if isinstance(prov, dict):
+                        for key in ("model", "models"):
+                            val = prov.get(key)
+                            if isinstance(val, str) and val:
+                                models.add(val)
+                            elif isinstance(val, list):
+                                for v in val:
+                                    if v:
+                                        models.add(v)
+                # Fallback providers
+                for fb in cfg.get("fallback_providers", []):
+                    if isinstance(fb, dict) and fb.get("model"):
+                        models.add(fb["model"])
+            except Exception:
+                pass
+
+        # 2. Profile-level model caches (OpenRouter, etc.)
+        profile_dir = Path.home() / ".hermes" / "profiles"
+        if profile_dir.exists():
+            for cache_file in profile_dir.rglob("*model*cache*.json"):
+                try:
+                    data = json.loads(cache_file.read_text())
+                    for provider_info in data.values():
+                        prov_models = provider_info.get("models", {})
+                        if isinstance(prov_models, dict):
+                            models.update(prov_models.keys())
+                        elif isinstance(prov_models, list):
+                            for m in prov_models:
+                                if isinstance(m, dict) and m.get("id"):
+                                    models.add(m["id"])
+                except Exception:
+                    pass
+
+        # 3. Profile configs for any model setting
+        for profile_config in profile_dir.rglob("config.yaml"):
+            try:
+                import yaml
+                pc = yaml.safe_load(profile_config.read_text()) or {}
+                for key in ("model", "default_model", "LLM_MODEL"):
+                    val = pc.get(key, pc.get("env", {}).get(key))
+                    if isinstance(val, str) and val and val not in ("''", ""):
+                        models.add(val)
+            except Exception:
+                pass
+
+        # 4. .env files in profiles
+        for env_file in profile_dir.rglob(".env"):
+            try:
+                for line in env_file.read_text().splitlines():
+                    line = line.strip()
+                    if line.startswith("LLM_MODEL=") or line.startswith("HERMES_INFERENCE_MODEL="):
+                        val = line.split("=", 1)[1].strip().strip("'\"")
+                        if val:
                             models.add(val)
-                        elif isinstance(val, list):
-                            for v in val:
-                                if v:
-                                    models.add(v)
-            # Fallback providers
-            for fb in cfg.get("fallback_providers", []):
-                if isinstance(fb, dict) and fb.get("model"):
-                    models.add(fb["model"])
-            # Filter out non-LLM models (TTS, STT, speech/audio only)
-            known_non_llm = {"whisper-1", "base", "gpt-4o-mini-tts"}
-            models = {
-                m for m in models
-                if m not in known_non_llm
-                and "tts" not in m.lower()
-                and "voxtral" not in m.lower()
-                and "neuphonic" not in m.lower()
-            }
-            return sorted(models) if models else ["deepseek-v4-flash"]
-        except Exception:
-            return [cfg.get("model", {}).get("default", "deepseek-v4-flash")]
+            except Exception:
+                pass
+
+        # Fall back
+        if not models:
+            fallback = os.environ.get("HERMES_INFERENCE_MODEL", "deepseek-v4-flash")
+            models.add(fallback)
+
+        # Filter out non-LLM models
+        known_non_llm = {"whisper-1", "base", "gpt-4o-mini-tts"}
+        models = {
+            m for m in models
+            if m not in known_non_llm
+            and "tts" not in m.lower()
+            and "voxtral" not in m.lower()
+            and "neuphonic" not in m.lower()
+        }
+        return sorted(models)
 
     def _list_runs() -> list[dict]:
         if not runs_base.exists():
