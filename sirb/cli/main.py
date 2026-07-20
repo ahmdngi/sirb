@@ -1430,7 +1430,6 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
       <div id="live-stats" class="stat-grid"></div>
       <div id="report-tabs" style="display:none;border-bottom:1px solid var(--border);margin-bottom:0.5em;">
         <button class="tab-btn active" data-tab="swarm" onclick="switchTab('swarm')">📋 Swarm</button>
-        <button class="tab-btn" data-tab="connections" onclick="switchTab('connections')">🔗 Connections</button>
         <span id="vessel-tabs"></span>
       </div>
       <div id="final-summary" class="final-summary" style="display:none;">
