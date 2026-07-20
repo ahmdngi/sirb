@@ -9,7 +9,8 @@
     {"value": "claude-sonnet-5", "provider": "anthropic", "label": "Claude Sonnet 5"},
     {"value": "claude-fable-5", "provider": "anthropic", "label": "Claude Fable 5"},
     {"value": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "provider": "custom:llama-local", "label": "Llama 3.1 8B (local)"},
-    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"}
+    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"},
+    {"value": "zai-org/glm-5.2", "provider": "hpc-ai", "label": "GLM 5.2 (HPC)"}
   ],
   "local": [
     {"value": "qwen2.5:3b", "provider": "custom:ollama", "label": "Qwen 2.5 3B"},
@@ -27,7 +28,8 @@
     {"value": "claude-sonnet-5", "provider": "anthropic", "label": "Claude Sonnet 5"},
     {"value": "gpt-4o", "provider": "openai", "label": "GPT-4o"},
     {"value": "gpt-4o-mini", "provider": "openai", "label": "GPT-4o Mini"},
-    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"}
+    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"},
+    {"value": "zai-org/glm-5.2", "provider": "hpc-ai", "label": "GLM 5.2 (HPC)"}
   ],
   "shipcrawler": [
     {"value": "deepseek-v4-flash", "provider": "deepseek", "label": "DeepSeek V4 Flash"},
@@ -39,6 +41,7 @@
     {"value": "claude-fable-5", "provider": "anthropic", "label": "Claude Fable 5"},
     {"value": "gpt-4o", "provider": "openai", "label": "GPT-4o"},
     {"value": "gpt-4o-mini", "provider": "openai", "label": "GPT-4o Mini"},
-    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"}
+    {"value": "zai-org/glm-5.1", "provider": "hpc-ai", "label": "GLM 5.1 (HPC)"},
+    {"value": "zai-org/glm-5.2", "provider": "hpc-ai", "label": "GLM 5.2 (HPC)"}
   ]
 }
