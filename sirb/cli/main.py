@@ -819,17 +819,21 @@ def _dashboard(args):
                             f"Shodan attack surface, CVE vulnerability assessment, "
                             f"threat intelligence from news and maritime cyber incidents. "
                             f"Mode: {md}. "
-                            f"Generate a comprehensive report with full findings. "
-                            f"Save your report to the directory."
+                            f"Generate a comprehensive report with full findings."
                         )
                         env = os.environ.copy()
+                        cmd = ["hermes", "chat", "-q", prompt,
+                               "--skills", "shipcrawler",
+                               "-t", "web,terminal",
+                               "--yolo", "--max-turns", "150",
+                               "--source", "tool"]
                         if prof and prof != "default":
-                            env["HERMES_PROFILE"] = prof
+                            cmd.extend(["--profile", prof])
                         if mod:
-                            env["HERMES_MODEL"] = mod
+                            cmd.extend(["--model", mod])
                         try:
                             proc = subprocess.Popen(
-                                ["hermes", "run", "-b", "-s", "shipcrawler", prompt],
+                                cmd,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, env=env,
                             )
