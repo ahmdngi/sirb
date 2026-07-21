@@ -997,7 +997,7 @@ def _dashboard(args):
                     vessels = []
                     for v in sorted(vdir.iterdir()):
                         if v.is_dir():
-                            files = sorted(f.name for f in v.iterdir() if f.suffix in (".md", ".log", ".txt"))
+                            files = sorted(f.name for f in v.iterdir() if f.suffix in (".md", ".log", ".txt") and f.stat().st_size > 0)
                             if files:
                                 vessels.append({"target": v.name, "files": files})
                         elif v.suffix in (".log", ".txt", ".md"):
@@ -1159,8 +1159,16 @@ def _dashboard(args):
                     except Exception:
                         pass
 
+                def _run_swarm_safe(rid, targets, md, prof, mod):
+                    try:
+                        _run_swarm(rid, targets, md, prof, mod)
+                    except Exception as e:
+                        import traceback
+                        tb = traceback.format_exc()
+                        print(f"[sirb] ERROR in _run_swarm thread: {e}\n{tb}", flush=True)
+
                 thread = threading.Thread(
-                    target=_run_swarm,
+                    target=_run_swarm_safe,
                     args=(run_id, mmsi_list, mode, profile, model),
                     daemon=True,
                 )
