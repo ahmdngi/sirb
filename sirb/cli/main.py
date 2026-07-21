@@ -990,6 +990,9 @@ def _dashboard(args):
                     agents = tr.get("agents", {})
                     vd = runs_base / rid / "vessels"
                     stats = _accumulate_stats(agents, vd)
+                    # Override model from tracking if available
+                    if tr.get("model"):
+                        stats["model"] = tr["model"]
                     self._send_json(stats)
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
@@ -1063,9 +1066,9 @@ def _dashboard(args):
                 rundir.mkdir(parents=True, exist_ok=True)
                 vessels_dir = rundir / "vessels"
                 vessels_dir.mkdir(exist_ok=True)
-                tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode,
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                            "status": "running", "agents": {}}
+                tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode, "model": model or "deepseek-v4-flash",
+                             "created_at": datetime.now(timezone.utc).isoformat(),
+                             "status": "running", "agents": {}}
                 (rundir / "tracking.json").write_text(json.dumps(tracking))
 
                 # Spawn hermes agents in background thread
