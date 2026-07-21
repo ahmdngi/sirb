@@ -10,15 +10,26 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    from jinja2 import Environment, FileSystemLoader
+    _JINJA_AVAILABLE = True
+except ImportError:
+    _JINJA_AVAILABLE = False
 
 from sirb.core import (
     Task, Finding, TaskQueue, WorkerRegistry, Router,
     WorkerPool, Checkpointer, Blackboard, TokenBucketPool,
 )
 from sirb.core.worker_base import SirbWorker
+
+
+_SIRB_VERSION = "0.2.0"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -661,71 +672,70 @@ def _dashboard(args):
             return json.loads(sjp.read_text())
         return {}
 
-    def _vessel_positions(rid: str) -> list[dict]:
-        bp = runs_base / rid / "blackboard.json"
-        if not bp.exists():
-            return []
-        try:
-            data = json.loads(bp.read_text())
-            findings = data.get("findings", [])
-            positions = []
-            for f in findings:
-                if f.get("finding_type") == "current_position":
-                    detail = f.get("detail", {})
-                    lat = detail.get("lat")
-                    lon = detail.get("lon")
-                    if lat and lon:
-                        positions.append({
-                            "target_id": f.get("target_id"),
-                            "lat": lat, "lon": lon,
-                            "destination": detail.get("destination", ""),
-                        })
-            return positions
-        except Exception:
-            return []
-
     def _extract_vessel_data(target: str, vessels_dir: Path) -> dict:
-        """Extract structured vessel data from agent log files."""
+        """Extract structured vessel data from analyst report markdown."""
         data = {"target": target, "name": target, "mmsi": "", "imo": "",
                 "owner": "", "operator": "", "manager": "", "flag": "",
                 "callsign": "", "type": "", "tonnage": "", "year_built": "",
                 "ports": [], "connections": ""}
-        # Read agent log
+
+        # Read analyst report first (structured markdown), fall back to log
+        sub = vessels_dir / target
+        report_text = ""
+        if sub.exists():
+            for f in sorted(sub.glob("*.md")):
+                report_text += f.read_text(errors="replace") + "\n"
         log_path = vessels_dir / f"{target}.log"
-        if not log_path.exists():
-            # Check subdirectory
-            sub = vessels_dir / target
-            files = list(sub.glob("*.md")) + list(sub.glob("*.log")) + list(sub.glob("*.txt"))
-            log_path = files[0] if files else None
-        if not log_path or not log_path.exists():
-            return data
-        text = log_path.read_text(errors="replace")
+        log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+        # Use report text for structured fields, log as fallback
+        text = report_text or log_text
 
         # Extract IMO number
         m = re.search(r'\bIMO\s*:?\s*(\d{7})\b', text, re.IGNORECASE)
         if m: data["imo"] = m.group(1)
-        m = re.search(r'\bIMO\s*(\d{7})\b', text)
-        if m: data["imo"] = m.group(1)
+        if not data["imo"]:
+            m = re.search(r'\bIMO\s*(\d{7})\b', text)
+            if m: data["imo"] = m.group(1)
 
         # Extract MMSI
         m = re.search(r'\bMMSI\s*:?\s*(\d{9})\b', text, re.IGNORECASE)
         if m: data["mmsi"] = m.group(1)
 
-        # Extract vessel name
-        m = re.search(r'(?i)(?:vessel\s*[:\-*]\s*|name\s*[:\-*]\s*|ship\s*[:\-*]\s*["\']?)([A-Za-z0-9\s\-]+?)(?:\s*[,\.]|\s*MMSI|\s*IMO|\s*Flag|\s*$)', text)
-        if m: data["name"] = m.group(1).strip()
+        # Extract vessel name — match "| **Current Name** | Value |" or "**Target:** NAME (IMO"
+        m = re.search(r'\|\s*\*?\*?Current\s*Name\*?\*?\s*\|\s*([^|]+?)\s*\|', text)
+        if not m:
+            m = re.search(r'\*?\*?Target\*?\*?\s*:\s*([A-Za-z0-9][A-Za-z0-9\s\-]+?)(?:\s*\(IMO|\s*\(MMSI|\s*\n)', text)
+        if not m:
+            m = re.search(r'(?i)(?:vessel\s*[:\-]\s*|name\s*[:\-]\s*|ship\s*[:\-]\s*["\']?)([A-Za-z0-9\s\-]+?)(?:\s*[,.]|\s*MMSI|\s*IMO|\s*Flag|\s*$)', text)
+        if m: data["name"] = m.group(1).strip()[:50]
 
-        # Extract flag
-        m = re.search(r'(?i)Flag\s*:?\s*([A-Za-z\s]+?)(?:\s*[,\.]|\s*\n|$)', text)
-        if m: data["flag"] = m.group(1).strip()
+        # Extract flag — match "| **Flag** | Value |" in markdown table
+        m = re.search(r'\|\s*\*?\*?Flag\*?\*?\s*\|\s*([^|]+?)\s*\|', text)
+        if not m:
+            m = re.search(r'(?:^|\n)\s*\*?\*?Flag\*?\*?\s*[:\|]\s*([A-Za-z][A-Za-z\s]{1,30}?)(?:\s*[,.]|\s*\(|\s*\n|$)', text)
+        if m: data["flag"] = m.group(1).strip()[:40]
+        # Filter out jinja placeholder values
+        if data["flag"] and ("<!--" in data["flag"] or data["flag"].startswith("discovered")):
+            data["flag"] = ""
 
-        # Extract owner
-        m = re.search(r'(?i)(?:Owner|Registered\s*owner)\s*:?\s*["\']?([A-Za-z0-9\s\.\,\-&\']+?)(?:\s*[,\.]|\s*Address|\s*Operator|\s*$)', text)
-        if m: data["owner"] = m.group(1).strip()
+        # Extract owner — match "| **Registered Owner** | Value |" in markdown table
+        m = re.search(r'\|\s*\*?\*?Registered\s*Owner\*?\*?\s*\|\s*([^|]+?)\s*\|', text)
+        if not m:
+            m = re.search(r'\|\s*\*?\*?Owner\*?\*?\s*\|\s*([^|]+?)\s*\|', text)
+        if not m:
+            m = re.search(r'(?:^|\n)\s*\*?\*?(?:Registered\s*Owner|Owner)\*?\*?\s*[:\|]\s*([A-Za-z0-9][A-Za-z0-9\s\.,\-&]{1,60}?)(?:\s*\(|\s*since|\s*IMO|\s*\n|$)', text)
+        if m:
+            owner = m.group(1).strip().rstrip('.,&')[:60]
+            data["owner"] = owner
+        # Filter out jinja placeholder values
+        if data["owner"] and ("<!--" in data["owner"] or data["owner"].startswith("discovered")):
+            data["owner"] = ""
 
-        # Extract operator
-        m = re.search(r'(?i)(?:Operator|Commercial\s*operator)\s*:?\s*["\']?([A-Za-z0-9\s\.\,\-&\']+?)(?:\s*[,\.]|\s*$)', text)
-        if m: data["operator"] = m.group(1).strip()
+        # Extract operator from markdown
+        m = re.search(r'(?i)(?:Operator|Commercial\s*Manager)\s*\|?\s*(.+?)(?:\s*\||\s*\n)', text)
+        if not m:
+            m = re.search(r'(?i)(?:Operator|Commercial\s*operator)\s*:?\s*["\']?([A-Za-z0-9\s\.\,\-&\']+?)(?:\s*[,.]|\s*$)', text, re.MULTILINE)
+        if m: data["operator"] = m.group(1).strip()[:60]
 
         # Extract port calls
         port_matches = re.findall(r'(?i)(?:Port|Port\s*call|Called\s*at)\s*:?\s*["\']?([A-Za-z\s\-]+?)(?:\s*[,\.]|\s*on|\s*Date|\s*$)', text)
@@ -736,106 +746,6 @@ def _dashboard(args):
         data["connections"] = " ".join(conn_matches[:5])
 
         return data
-
-    def _extract_agent_stats(target: str, vessels_dir: Path) -> dict:
-        """Extract stats from hermes agent log."""
-        stats = {"phases": 0, "duration": "—", "reports": 0,
-                 "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
-                 "model": "—"}
-        log_path = vessels_dir / f"{target}.log"
-        text = None
-        if log_path.exists():
-            text = log_path.read_text(errors="replace")
-        else:
-            sub = vessels_dir / target
-            texts = []
-            for f in sorted(sub.glob("*.md")):
-                try:
-                    texts.append(f.read_text(errors="replace"))
-                except Exception:
-                    pass
-            if texts:
-                text = "\n".join(texts)
-        if not text:
-            return stats
-
-        # Count actual tool executions (hermes format: ┊ 💻 $ command)
-        tool_execs = re.findall(r'┊ 💻 \$', text)
-        stats["tool_calls"] = len(tool_execs)
-
-        # Count web searches (hermes terminal commands that look like searches)
-        searches = re.findall(r'┊ 💻 \$\s+(?:web_search|web_extract|curl |wget |grep |whois |dig |nslookup)', text)
-        stats["searches"] = len(searches)
-
-        # Count sources (Fetching, sourced from, visited)
-        sources = re.findall(r'(?i)(?:Fetching|🌐|sourced from|visited)', text)
-        stats["sources"] = len(sources)
-
-        # Shodan — count Shodan-related lines
-        shodan = re.findall(r'(?i)\bShodan\b', text)
-        stats["shodan"] = len(shodan)
-
-        # Duration — parse session summary line
-        dur = re.search(r'Duration:\s*([\d.]+)s', text)
-        if dur:
-            total_s = float(dur.group(1))
-            if total_s >= 60:
-                stats["duration"] = f"{int(total_s/60)}m {int(total_s%60)}s"
-            else:
-                stats["duration"] = f"{int(total_s)}s"
-
-        # Model — read from hermes CLI args in the log header
-        model_m = re.search(r'--model\s+([\w.-]+)', text)
-        if model_m:
-            stats["model"] = model_m.group(1)
-
-        # Phases — count numbered report sections in vessel files
-        sub = vessels_dir / target
-        sections = set()
-        for f in sorted(sub.glob("*.md")):
-            try:
-                t = f.read_text(errors="replace")
-                for m in re.finditer(r'^## (\d+)\.\s+\w', t, re.MULTILINE):
-                    sections.add(int(m.group(1)))
-            except Exception:
-                pass
-        if sections:
-            stats["phases"] = max(sections)
-
-        # Reports — count actual .md files saved in the vessel directory
-        if sub.exists():
-            stats["reports"] = len([f for f in sub.glob("*.md") if f.stat().st_size > 100])
-
-        # If no tool executions found, fall back to text patterns
-        if stats["tool_calls"] == 0:
-            stats["tool_calls"] = len(re.findall(r'(?i)(?:Tool call|⚙️)', text))
-
-        return stats
-
-    def _accumulate_stats(agents: dict, vessels_dir: Path) -> dict:
-        """Sum stats across all agents."""
-        total = {"phases": 0, "duration": "—", "reports": 0,
-                 "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
-                 "model": "—"}
-        durations = []
-        models = set()
-        for t in agents:
-            s = _extract_agent_stats(t, vessels_dir)
-            total["phases"] += s["phases"]
-            total["reports"] += s["reports"]
-            total["tool_calls"] += s["tool_calls"]
-            total["searches"] += s["searches"]
-            total["sources"] += s["sources"]
-            total["shodan"] += s["shodan"]
-            if s["duration"] != "—":
-                durations.append(s["duration"])
-            if s["model"] != "—":
-                models.add(s["model"])
-        if durations:
-            total["duration"] = ", ".join(durations)
-        if models:
-            total["model"] = ", ".join(sorted(models))
-        return total
 
     def _generate_connections(agents: dict, vessels_dir: Path) -> str:
         """Analyze cross-vessel connections from agent outputs."""
@@ -916,23 +826,54 @@ def _dashboard(args):
 
     def _generate_swarm_report(rid: str, targets: list, mode: str,
                                 agents: dict, connections: str) -> str:
-        """Generate the combined Sirb swarm report."""
+        """Generate the combined Sirb swarm report.
+
+        Uses a Jinja2 template (templates/swarm-report.j2) when available
+        for consistent formatting. Falls back to inline string building.
+        """
+        vessels_dir = runs_base / rid / "vessels"
+        vessel_data = {}
+        for t in targets:
+            vessel_data[t] = _extract_vessel_data(t, vessels_dir)
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+        if _JINJA_AVAILABLE and (_TEMPLATES_DIR / "swarm-report.j2").exists():
+            env = Environment(
+                loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+                autoescape=False,
+                trim_blocks=True,
+                lstrip_blocks=True,
+                keep_trailing_newline=True,
+            )
+            template = env.get_template("swarm-report.j2")
+            return template.render(
+                rid=rid,
+                mode=mode,
+                targets=targets,
+                agents=agents,
+                vessel_data=vessel_data,
+                connections=connections,
+                generated_at=generated_at,
+                framework_version=_SIRB_VERSION,
+            )
+
+        # Fallback: inline string builder
         lines = [f"# Sirb Swarm Report: {rid}\n"]
         lines.append(f"\n**Mode:** {mode}\n")
         lines.append(f"**Targets ({len(targets)}):** {', '.join(targets)}\n")
-        lines.append(f"**Generated:** {datetime.now(timezone.utc).isoformat()}\n\n")
+        lines.append(f"**Generated:** {generated_at}\n\n")
         lines.append("## Agent Results\n\n")
         lines.append("| Target | Status | IMO | Flag | Owner |\n")
         lines.append("|--------|--------|-----|------|-------|\n")
-        vessels_dir = runs_base / rid / "vessels"
         for t in targets:
             a = agents.get(t, {})
             s = a.get("status", "?")
-            icon = "✅" if s == "done" else "❌"
-            d = _extract_vessel_data(t, vessels_dir)
-            imo = d["imo"] or "—"
-            flag = d["flag"] or "—"
-            owner = d["owner"][:30] if d["owner"] else "—"
+            icon = "✅" if s in ("done", "success") else "❌"
+            d = vessel_data.get(t, {})
+            imo = d.get("imo") or "—"
+            flag = d.get("flag") or "—"
+            owner = (d.get("owner") or "")[:30] or "—"
             lines.append(f"| {t} | {icon} | {imo} | {flag} | {owner} |\n")
         lines.append(f"\n## Cross-Vessel Analysis\n\n{connections}\n")
         return "".join(lines)
@@ -972,6 +913,13 @@ def _dashboard(args):
                     self._send_html(rp.read_text())
                 else:
                     self._send_html("<p>Report not ready yet. Agents still running.</p>")
+            elif re.match(r"^/run/[^/]+/tracking\.json$", path):
+                rid = path.split("/")[2]
+                tp = runs_base / rid / "tracking.json"
+                if tp.exists():
+                    self._send_json(json.loads(tp.read_text()))
+                else:
+                    self._send_json({})
             elif path.startswith("/run/") and path.endswith("/connections"):
                 rid = path.split("/")[2]
                 cp = runs_base / rid / "connections.md"
@@ -987,13 +935,39 @@ def _dashboard(args):
                     return
                 try:
                     tr = json.loads(tr_path.read_text())
-                    agents = tr.get("agents", {})
                     vd = runs_base / rid / "vessels"
-                    stats = _accumulate_stats(agents, vd)
-                    # Override model from tracking if available
-                    if tr.get("model"):
-                        stats["model"] = tr["model"]
-                    self._send_json(stats)
+                    # Use worker's extract_stats (agnostic — no hardcoded stats)
+                    from sirb.core.registry import WorkerRegistry
+                    reg = WorkerRegistry()
+                    reg.discover()
+                    reg.discover_entry_points()
+                    worker_name = tr.get("worker", "shipcrawler")
+                    if worker_name not in reg:
+                        self._send_json({"error": f"worker '{worker_name}' not installed"})
+                        return
+                    worker = reg[worker_name]
+                    # Accumulate stats across all agents using worker's extract_stats
+                    total = {}
+                    agent_targets = tr.get("agents", {})
+                    if not agent_targets and tr.get("targets"):
+                        # Run still in progress — use targets list
+                        agent_targets = {t: {} for t in tr["targets"]}
+                    for target in agent_targets:
+                        log_path = str(vd / f"{target}.log")
+                        report_dir = str(vd / target)
+                        s = worker.extract_stats(log_path, report_dir)
+                        for k, v in s.items():
+                            if isinstance(v, (int, float)):
+                                total[k] = total.get(k, 0) + v
+                            elif k == "phases":
+                                total[k] = max(v, total.get(k, 0))
+                            elif k == "duration":
+                                total[k] = v  # last agent's duration
+                            else:
+                                total[k] = v  # last value wins for strings
+                    if tr.get("model") and total.get("model", "—") == "—":
+                        total["model"] = tr["model"]
+                    self._send_json(total)
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
             elif path.startswith("/run/") and "/vessel/" in path and path.endswith(".md"):
@@ -1007,6 +981,22 @@ def _dashboard(args):
                     self._send_html(fp.read_text())
                 else:
                     self._send_html("<p>File not found.</p>", 404)
+            elif re.match(r"^/run/[^/]+/targets$", path):
+                # List per-target report files (agnostic — used by per_target tabs)
+                rid = path.split("/")[2]
+                vdir = runs_base / rid / "vessels"
+                if vdir.exists():
+                    targets = []
+                    for v in sorted(vdir.iterdir()):
+                        if v.is_dir():
+                            files = sorted(f.name for f in v.iterdir()
+                                          if f.suffix in (".md", ".log", ".txt")
+                                          and f.stat().st_size > 0)
+                            if files:
+                                targets.append({"target": v.name, "files": files})
+                    self._send_json(targets)
+                else:
+                    self._send_json([])
             elif re.match(r"^/run/[^/]+/vessels$", path):
                 rid = path.split("/")[2]
                 vdir = runs_base / rid / "vessels"
@@ -1023,13 +1013,53 @@ def _dashboard(args):
                     self._send_json(vessels)
                 else:
                     self._send_json([])
-            elif path.startswith("/run/") and path.endswith("/positions"):
-                rid = path.split("/")[2]
-                self._send_json(_vessel_positions(rid))
             elif path == "/map":
                 self._serve_map_html()
             elif path == "/models":
                 self._send_json(_load_models())
+            elif path == "/api/workers":
+                # List installed SirbWorkers (discovered via entry points)
+                from sirb.core.registry import WorkerRegistry
+                reg = WorkerRegistry()
+                reg.discover()
+                reg.discover_entry_points()
+                workers = []
+                for name, w in reg.items():
+                    workers.append({"name": name, "description": getattr(w, "description", "")})
+                self._send_json(workers)
+            elif re.match(r"^/api/workers/[^/]+/schema$", path):
+                # Get input form schema for a specific worker
+                wname = path.split("/")[3]
+                from sirb.core.registry import WorkerRegistry
+                reg = WorkerRegistry()
+                reg.discover()
+                reg.discover_entry_points()
+                if wname in reg:
+                    self._send_json(reg[wname].input_schema())
+                else:
+                    self._send_json({"error": "worker not found"}, 404)
+            elif re.match(r"^/api/workers/[^/]+/stats-schema$", path):
+                # Get stats bar schema for a specific worker
+                wname = path.split("/")[3]
+                from sirb.core.registry import WorkerRegistry
+                reg = WorkerRegistry()
+                reg.discover()
+                reg.discover_entry_points()
+                if wname in reg:
+                    self._send_json(reg[wname].stats_schema())
+                else:
+                    self._send_json({"error": "worker not found"}, 404)
+            elif re.match(r"^/api/workers/[^/]+/report-tabs$", path):
+                # Get report tab definitions for a specific worker
+                wname = path.split("/")[3]
+                from sirb.core.registry import WorkerRegistry
+                reg = WorkerRegistry()
+                reg.discover()
+                reg.discover_entry_points()
+                if wname in reg:
+                    self._send_json(reg[wname].report_tabs(""))
+                else:
+                    self._send_json({"error": "worker not found"}, 404)
             elif path == "/api/profiles/models":
                 pm_path = Path(__file__).parent / "profiles-models.json"
                 try:
@@ -1052,7 +1082,20 @@ def _dashboard(args):
             path = parsed.path
             params = urllib.parse.parse_qs(body)
 
-            if path == "/run/new":
+            if re.match(r"^/api/workers/[^/]+/parse$", path):
+                # Parse raw input into structured targets
+                wname = path.split("/")[3]
+                from sirb.core.registry import WorkerRegistry
+                reg = WorkerRegistry()
+                reg.discover()
+                reg.discover_entry_points()
+                if wname not in reg:
+                    self._send_json({"error": "worker not found"}, 404)
+                    return
+                raw_input = params.get("input", [""])[0]
+                targets = reg[wname].parse_targets(raw_input)
+                self._send_json({"targets": targets})
+            elif path == "/run/new":
                 mmsis = params.get("mmsi", [""])[0].strip()
                 mode = params.get("mode", ["fast"])[0].strip()
                 profile = params.get("profile", [""])[0].strip()
@@ -1066,100 +1109,131 @@ def _dashboard(args):
                 rundir.mkdir(parents=True, exist_ok=True)
                 vessels_dir = rundir / "vessels"
                 vessels_dir.mkdir(exist_ok=True)
+                worker_name = params.get("worker", ["shipcrawler"])[0].strip() or "shipcrawler"
                 tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode, "model": model or "deepseek-v4-flash",
+                             "worker": worker_name,
                              "created_at": datetime.now(timezone.utc).isoformat(),
                              "status": "running", "agents": {}}
                 (rundir / "tracking.json").write_text(json.dumps(tracking))
 
                 # Spawn hermes agents in background thread
-                def _run_swarm(rid, targets, md, prof, mod):
-                    agents = {}
+                def _run_swarm(rid, targets, md, prof, mod, worker_name="shipcrawler"):
+                    """Run tasks via core kernel (TaskQueue + WorkerPool + Blackboard).
+
+                    Agnostic: discovers workers via pip entry points — sirb
+                    doesn't know what a vessel or shipcrawler is.
+                    """
+                    from sirb.core import TaskQueue, WorkerPool, Blackboard, Router, Task
+                    from sirb.core.registry import WorkerRegistry
+
                     vessels_path = runs_base / rid / "vessels"
                     tr_path = runs_base / rid / "tracking.json"
 
-                    # ── Helper: launch a single agent ──
-                    def _launch_agent(target):
-                        agent_dir = runs_base / rid / "vessels" / target
+                    # Discover installed workers via entry points
+                    registry = WorkerRegistry()
+                    registry.discover()
+                    registry.discover_entry_points()
+
+                    if worker_name not in registry:
+                        # Fallback: no workers installed
+                        tr = {"run_id": rid, "targets": targets, "mode": md,
+                              "model": mod or "glm-5.2",
+                              "created_at": datetime.now(timezone.utc).isoformat(),
+                              "status": "error",
+                              "error": f"Worker '{worker_name}' not installed. pip install <worker-package>."}
+                        tr_path.write_text(json.dumps(tr))
+                        return
+
+                    worker = registry[worker_name]
+                    router = Router(registry)
+
+                    # Create queue + blackboard
+                    queue = TaskQueue()
+                    blackboard = Blackboard(decay_rate=0.9)
+
+                    # Add tasks to queue
+                    for target in targets:
+                        agent_dir = vessels_path / target
                         agent_dir.mkdir(parents=True, exist_ok=True)
                         log_path = vessels_path / f"{target}.log"
-                        prompt = (
-                            f"Using the shipcrawler OSINT framework, research the vessel {target}. "
-                            f"Execute ALL phases: Equasis identity, AIS tracking, "
-                            f"Shodan attack surface, CVE vulnerability assessment, "
-                            f"threat intelligence from news and maritime cyber incidents. "
-                            f"Mode: {md}. "
-                            f"SAVE ALL report files to the directory: {agent_dir}/"
+                        task = Task(
+                            type="vessel_osint",
+                            worker=worker_name,
+                            params={"target": target, "mmsi": target, "run_id": rid,
+                                    "agent_dir": str(agent_dir),
+                                    "log_path": str(log_path),
+                                    "mode": md,
+                                    "profile": prof,
+                                    "model": mod},
                         )
-                        env = os.environ.copy()
-                        cmd = ["hermes", "chat", "-q", prompt,
-                               "--skills", "shipcrawler",
-                               "-t", "web,terminal",
-                               "--yolo", "--max-turns", "150",
-                               "--source", "tool"]
-                        if prof and prof != "default":
-                            cmd.extend(["--profile", prof])
-                        if mod:
-                            cmd.extend(["--model", mod])
-                        proc = subprocess.Popen(
-                            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, env=env,
-                        )
-                        # Reader thread: writes stdout to log file line by line
-                        def _reader(p, lp):
+                        queue.add(task)
+
+                    # Update tracking
+                    def _update_tracking(status, agents_data=None):
+                        # Preserve existing agents dict if not explicitly provided
+                        if agents_data is None:
                             try:
-                                with open(lp, "w") as f:
-                                    for line in p.stdout:
-                                        f.write(line)
-                                        f.flush()
+                                existing = json.loads(tr_path.read_text())
+                                agents_data = existing.get("agents", {})
                             except Exception:
-                                pass
-                        import threading as _th
-                        t = _th.Thread(target=_reader, args=(proc, log_path), daemon=True)
-                        t.start()
-                        return proc
+                                agents_data = {}
+                        tr = {"run_id": rid, "targets": targets, "mode": md,
+                              "model": mod or "glm-5.2",
+                              "created_at": datetime.now(timezone.utc).isoformat(),
+                              "status": status, "agents": agents_data}
+                        tr_path.write_text(json.dumps(tr))
 
-                    # ── Parallel agent launch ──
-                    procs = {}
-                    for t in targets:
+                    _update_tracking("running")
+                    # Mark all agents as running in tracking
+                    try:
+                        tr = json.loads(tr_path.read_text())
+                        tr["agents"] = {t: {"status": "running"} for t in targets}
+                        tr_path.write_text(json.dumps(tr))
+                    except Exception:
+                        pass
+
+                    # on_complete callback — write findings to blackboard + update tracking
+                    def on_complete(task, result):
+                        for finding in result.findings:
+                            blackboard.add(finding)
+                        # Update tracking with agent status
                         try:
-                            proc = _launch_agent(t)
-                            procs[t] = proc
-                        except Exception as e:
-                            agents[t] = {"target": t, "status": "error", "error": str(e)}
-                            procs[t] = None
+                            tr = json.loads(tr_path.read_text())
+                        except Exception:
+                            tr = {}
+                        if "agents" not in tr:
+                            tr["agents"] = {}
+                        tr["agents"][task.params["target"]] = {
+                            "status": result.status,
+                            "findings": len(result.findings),
+                            "artifacts": len(result.artifacts),
+                        }
+                        tr_path.write_text(json.dumps(tr))
 
-                    # Poll all until done (with total timeout)
-                    start_swarm = time.time()
-                    max_wait = 900  # 15 min total
-                    while procs and (time.time() - start_swarm) < max_wait:
-                        for t in list(procs.keys()):
-                            p = procs[t]
-                            if p is None:
-                                del procs[t]
-                                continue
-                            ret = p.poll()
-                            if ret is not None:
-                                # Agent finished — log already written by reader thread
-                                status = "done" if ret == 0 else "failed"
-                                agents[t] = {"target": t, "status": status, "exit_code": ret}
-                                del procs[t]
-                                # Update tracking immediately
-                                try:
-                                    tr = json.loads(tr_path.read_text())
-                                    tr["agents"] = agents
-                                    tr_path.write_text(json.dumps(tr))
-                                except Exception:
-                                    pass
-                        if procs:
-                            time.sleep(2)  # avoid busy-wait
+                    # Run pool
+                    pool = WorkerPool(
+                        queue=queue, router=router,
+                        max_workers=min(len(targets), 10),
+                        on_complete=on_complete,
+                    )
+                    pool.run()
 
-                    # Kill any remaining (timed out)
-                    for t, p in procs.items():
-                        if p and p.poll() is None:
-                            p.kill()
-                            agents[t] = {"target": t, "status": "timeout", "exit_code": -1}
+                    # Save blackboard
+                    import json as _json
+                    bb_data = {"findings": []}
+                    for f in blackboard.query():
+                        bb_data["findings"].append(f.to_dict())
+                    (runs_base / rid / "blackboard.json").write_text(_json.dumps(bb_data))
 
-                    # Generate connections analysis
+                    _update_tracking("done")
+
+                    # Generate connections analysis from blackboard findings
+                    agents = {}
+                    try:
+                        tr = json.loads(tr_path.read_text())
+                        agents = tr.get("agents", {})
+                    except Exception:
+                        pass
                     connections = _generate_connections(agents, vessels_path)
                     (runs_base / rid / "connections.md").write_text(connections)
 
@@ -1167,26 +1241,20 @@ def _dashboard(args):
                     report = _generate_swarm_report(rid, targets, md, agents, connections)
                     (runs_base / rid / "swarm-report.md").write_text(report)
 
-                    # Update final status
+                def _run_swarm_safe(rid, targets, md, prof, mod, worker_name="shipcrawler"):
                     try:
-                        tr = json.loads(tr_path.read_text())
-                        tr["status"] = "done"
-                        tr["agents"] = agents
-                        tr_path.write_text(json.dumps(tr))
-                    except Exception:
-                        pass
-
-                def _run_swarm_safe(rid, targets, md, prof, mod):
-                    try:
-                        _run_swarm(rid, targets, md, prof, mod)
+                        _run_swarm(rid, targets, md, prof, mod, worker_name)
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()
                         print(f"[sirb] ERROR in _run_swarm thread: {e}\n{tb}", flush=True)
 
+                # Get worker from POST params or default
+                worker_name = params.get("worker", ["shipcrawler"])[0].strip() or "shipcrawler"
+
                 thread = threading.Thread(
                     target=_run_swarm_safe,
-                    args=(run_id, mmsi_list, mode, profile, model),
+                    args=(run_id, mmsi_list, mode, profile, model, worker_name),
                     daemon=True,
                 )
                 thread.start()
@@ -1352,11 +1420,11 @@ def _dashboard(args):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sirb Swarm — Agent OSINT Dashboard</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNThhNmZmIiBzdHJva2Utd2lkdGg9IjIiPjxwYXRoIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTUtMTAtNXoiLz48cGF0aCBkPSJNMiAxN2wxMCA1IDEwLTUiLz48cGF0aCBkPSJNMiAxMmwxMCA1IDEwLTUiLz48L3N2Zz4=">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<title>SIRB — Agentic Swarm Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNThhNmZmIiBzdHJva2Utd2lkdGg9IjIiPjxwYXRoIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTUtMTAtNXoiLz48cGF0aCBkPSJNMiAxN2wxMCA1IDEwLTUiLz48cGF0aCBkPSJNMiAxMmwxMCA1IDEwLTUiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjIiIHI9IjEuNSIgZmlsbD0iIzU4YTZmZmYiLz48Y2lyY2xlIGN4PSIyIiBjeT0iNyIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjEuNSIgZmlsbD0iIzU4YTZmZiIvPjxjaXJjbGUgY3g9IjIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMiIgY3k9IjE3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIyMiIgY3k9IjE3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjIyIiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48L3N2Zz4=">
+
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1368,20 +1436,34 @@ def _dashboard(args):
   --accent: #58a6ff; --green: #3fb950; --red: #f85149;
   --gold: #d29922; --orange: #db6d28; --cyan: #22d3ee;
 }
+[data-theme="light"] {
+  --bg: #f6f8fa; --bg-2: #ffffff; --bg-3: #e1e4e8;
+  --border: #d0d7de; --border-2: #d8dee4;
+  --text: #1f2328; --text-2: #656d76; --text-3: #8c959f;
+  --accent: #0969da; --green: #1a7f37; --red: #cf222e;
+  --gold: #9a6700; --orange: #bc4c00; --cyan: #1b7c83;
+}
+[data-theme="classic"] {
+  --bg: #1a1a2e; --bg-2: #16213e; --bg-3: #0f3460;
+  --border: #334155; --border-2: #1e293b;
+  --text: #e2e8f0; --text-2: #94a3b8; --text-3: #64748b;
+  --accent: #7c3aed; --green: #10b981; --red: #ef4444;
+  --gold: #f59e0b; --orange: #f97316; --cyan: #06b6d4;
+}
 * { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; }
+body { font-family:"Inter",-apple-system,sans-serif; font-size:14px; background:var(--bg); color:var(--text); min-height:100vh; display:flex; }
 ::selection { background:var(--accent); color:#fff; }
 ::-webkit-scrollbar { width:5px; height:5px; }
 ::-webkit-scrollbar-track { background:transparent; }
 ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
 .sidebar { width:240px; flex-shrink:0; background:var(--bg-2); border-right:1px solid var(--border); display:flex; flex-direction:column; height:100vh; position:sticky; top:0; }
 .sidebar-header { padding:1em; border-bottom:1px solid var(--border); }
-.sidebar-header h2 { font-size:0.75em; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-2); font-weight:600; }
+.sidebar-header h2 { font-size:0.75rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-2); font-weight:600; }
 .sidebar-list { flex:1; overflow-y:auto; padding:0.5em; }
-.run-item { position:relative; padding:0.55em 0.65em; margin-bottom:0.25em; border-radius:6px; cursor:pointer; font-size:0.82em; transition:background 0.15s,border-left 0.15s; border-left:3px solid transparent; }
+.run-item { position:relative; padding:0.55rem 0.65rem; margin-bottom:0.25rem; border-radius:6px; cursor:pointer; font-size:0.82rem; transition:background 0.15s,border-left 0.15s; border-left:3px solid transparent; }
 .run-item:hover { background:var(--bg-3); }
 .run-item.active { background:var(--bg-3); border-left-color:var(--accent); }
-.run-item .date { font-size:0.7em; color:var(--text-3); }
+.run-item .date { font-size:0.7rem; color:var(--text-3); }
 .sidebar-delete {
   position:absolute; top:0.3rem; right:0.3rem;
   width:1.4rem; height:1.4rem; padding:0;
@@ -1411,12 +1493,18 @@ body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color
 .agent-card .ac-activity { font-size:0.65em; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; }
 nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
-nav .brand { font-size:1.1em; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
+nav .brand { font-size:1.1rem; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
 nav .brand-logo { height:26px; width:auto; }
 nav .brand span { color:var(--accent); }
-nav .selected-run { font-size:0.82em; color:var(--text-2); font-family:'JetBrains Mono',monospace; }
+nav .selected-run { font-size:0.82rem; color:var(--text-2); font-family:'JetBrains Mono',monospace; }
 nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em; }
-.sse-status { font-size:0.7em; display:inline-flex; align-items:center; gap:4px; color:var(--green); }
+.theme-switcher { display:flex; gap:2px; }
+.theme-pill { padding:0.2rem 0.6rem; font-size:0.7rem; cursor:pointer; border-radius:4px; color:var(--text-3); transition:color 0.15s,background 0.15s; }
+.theme-pill:hover { color:var(--text); background:var(--bg-3); }
+.theme-pill.active { color:var(--accent); background:rgba(88,166,255,0.08); }
+nav .nav-link { font-size:0.75rem; color:var(--text-2); text-decoration:none; }
+nav .nav-link:hover { color:var(--accent); }
+.sse-status { font-size:0.7rem; display:inline-flex; align-items:center; gap:4px; color:var(--green); }
 .sse-status::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--green); display:inline-block; }
 .sse-status.disconnected { color:var(--red); }
 .sse-status.disconnected::before { background:var(--red); }
@@ -1430,14 +1518,40 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
 .tdot-yellow { background:#ffbd2e; }
 .tdot-green { background:#27c93f; }
 .terminal-title { color:var(--text-3); font-size:0.72rem; position:absolute; left:50%; transform:translateX(-50%); }
-.terminal-body { padding:0.85rem; max-height:500px; overflow-y:auto; font-size:0.82rem; line-height:1.6; scroll-behavior:smooth; white-space:pre-wrap; word-break:break-word; }
+.terminal-body { padding:0.85rem; max-height:800px; overflow-y:auto; font-size:0.82rem; line-height:1.6; scroll-behavior:smooth; word-break:break-word; }
+.terminal-body:has(.md-content) { white-space:normal; }
+.md-content { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size:0.85rem; line-height:1.7; color:var(--text-1); }
+.md-content h1 { font-size:1.4em; font-weight:700; margin:1.2em 0 0.6em; padding-bottom:0.3em; border-bottom:1px solid var(--border); color:var(--text-1); }
+.md-content h2 { font-size:1.15em; font-weight:600; margin:1em 0 0.5em; padding-bottom:0.2em; border-bottom:1px solid var(--border); color:var(--text-1); }
+.md-content h3 { font-size:1em; font-weight:600; margin:0.8em 0 0.4em; color:var(--text-1); }
+.md-content h4 { font-size:0.9em; font-weight:600; margin:0.6em 0 0.3em; color:var(--text-2); }
+.md-content p { margin:0.5em 0; }
+.md-content ul, .md-content ol { margin:0.5em 0; padding-left:1.5em; }
+.md-content li { margin:0.2em 0; }
+.md-content table { border-collapse:collapse; width:100%; margin:0.8em 0; font-size:0.78rem; }
+.md-content th { background:var(--bg-3); border:1px solid var(--border); padding:0.4em 0.6em; text-align:left; font-weight:600; }
+.md-content td { border:1px solid var(--border); padding:0.3em 0.6em; }
+.md-content tr:nth-child(even) { background:var(--bg-2); }
+.md-content code { font-family:'JetBrains Mono',monospace; font-size:0.85em; background:var(--bg-3); padding:0.1em 0.3em; border-radius:3px; }
+.md-content pre { background:var(--bg-3); border:1px solid var(--border); border-radius:6px; padding:0.8em; overflow-x:auto; margin:0.8em 0; }
+.md-content pre code { background:none; padding:0; font-size:0.8rem; }
+.md-content blockquote { border-left:3px solid var(--accent); margin:0.8em 0; padding:0.3em 0.8em; color:var(--text-2); background:var(--bg-2); border-radius:0 4px 4px 0; }
+.md-content hr { border:none; border-top:1px solid var(--border); margin:1em 0; }
+.md-content strong { font-weight:600; color:var(--text-1); }
+.md-content a { color:var(--accent); text-decoration:none; }
+.md-content a:hover { text-decoration:underline; }
+.md-content img { max-width:100%; border-radius:6px; }
 .stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:0.5em; margin-bottom:1em; }
 .stat-card { background:var(--bg-2); border:1px solid var(--border); border-radius:6px; padding:0.75em; text-align:center; }
 .stat-card .label { font-size:0.7em; color:var(--text-2); text-transform:uppercase; letter-spacing:0.04em; }
 .stat-card .value { font-size:1.2em; font-weight:700; margin-top:0.15em; }
-.panel-right { width:340px; padding:1.25em; overflow-y:auto; background:var(--bg-2); border-left:1px solid var(--border); flex-shrink:0; }
+.panel-right { width:340px; padding:1.25em; overflow-y:auto; background:var(--bg-2); border-left:1px solid var(--border); flex-shrink:0; display:flex; flex-direction:column; }
 .panel-right h3 { font-size:0.85em; font-weight:600; display:flex; align-items:center; gap:0.5em; margin-bottom:1em; color:var(--text); }
-.hero-badge { display:inline-flex; align-items:center; gap:0.4rem; background:rgba(88,166,255,0.08); border:1px solid rgba(88,166,255,0.2); border-radius:999px; padding:0.25rem 0.85rem; font-size:0.7rem; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.75rem; }
+.hero-badge { display:inline-flex; align-items:center; gap:0.5rem; background:rgba(88,166,255,0.08); border:1px solid rgba(88,166,255,0.25); border-radius:999px; padding:0.35rem 1rem; font-size:0.75rem; color:var(--accent); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:1.5rem; }
+.sirb-hero { text-align:center; padding:1.5rem 1rem; }
+.sirb-hero h1 { font-size:clamp(1.6rem,4vw,2.6rem); font-weight:700; letter-spacing:-0.01em; margin-bottom:0.4rem; }
+.accent-gradient { background:linear-gradient(135deg,var(--accent),#79c0ff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+.sirb-hero p { color:var(--text-3); font-size:0.95rem; max-width:540px; margin:0 auto 1.5rem; line-height:1.6; }
 .live-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green); animation:pulse-dot 1.5s ease-in-out infinite; }
 @keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.85)} }
 .form-group { margin-bottom:0.75em; }
@@ -1456,7 +1570,6 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
 .method-panel .form-group { margin:0; }
 .method-panel input,.method-panel select { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:0.4em 0.6em; color:var(--text); font-size:0.82em; font-family:'JetBrains Mono',monospace; outline:none; }
 .method-panel input:focus { border-color:var(--accent); }
-#map { height:250px; border-radius:6px; margin-top:0.5em; border:1px solid var(--border); }
 .phase-line { padding:0.2rem 0; opacity:0; animation:phase-appear 0.25s ease forwards; }
 @keyframes phase-appear { from{opacity:0;transform:translateY(-3px)} to{opacity:1;transform:translateY(0)} }
 .phase-complete { color:var(--green); }
@@ -1484,94 +1597,109 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
 </div>
 <div class="main">
   <nav>
-    <div class="brand"><img src="/logo" class="brand-logo" alt="Sirb"><span>Sirb</span> Swarm</div>
+    <div class="brand" style="cursor:pointer;" onclick="goHome()"><img src="/logo" class="brand-logo" alt="SIRB"><span>SIRB</span> Swarm</div>
     <span class="selected-run" id="selected-run">No run selected</span>
-    <div class="nav-right"><span class="sse-status" id="sse-status">connected</span></div>
+    <div class="nav-right">
+      <a href="https://github.com/ahmdngi/sirb" target="_blank" class="nav-link">GitHub</a>
+      <div class="theme-switcher">
+        <span class="theme-pill active" data-theme="dark" onclick="applyTheme('dark')">Dark</span>
+        <span class="theme-pill" data-theme="light" onclick="applyTheme('light')">Light</span>
+        <span class="theme-pill" data-theme="classic" onclick="applyTheme('classic')">Classic</span>
+      </div>
+      <span class="sse-status" id="sse-status">connected</span>
+    </div>
   </nav>
   <div class="content">
     <div class="panel">
       <div id="live-stats" class="stat-grid"></div>
       <div id="agent-cards" class="agent-grid"></div>
+      <div class="sirb-hero" id="sirb-hero">
+        <div class="hero-badge"><span class="live-dot"></span> SIRB v0.3</div>
+        <h1><span class="accent-gradient">Agentic</span> Swarm Terminal</h1>
+        <p>Multi-agent swarm orchestration. Select a worker, paste targets, parse to verify, then launch a parallel investigation.</p>
+      </div>
       <div id="report-tabs" style="display:none;border-bottom:1px solid var(--border);margin-bottom:0.5em;">
-        <button class="tab-btn active" data-tab="swarm" onclick="switchTab('swarm')">📋 Swarm</button>
-        <span id="vessel-tabs"></span>
       </div>
       <div id="final-summary" class="final-summary" style="display:none;">
-        <div class="summary-stat"><span class="stat-icon">🧩</span><span class="stat-value" id="s-phases">0</span><span class="stat-label">Phases</span></div>
-        <div class="summary-stat"><span class="stat-icon">⏱</span><span class="stat-value" id="s-duration">—</span><span class="stat-label">Duration</span></div>
-        <div class="summary-stat"><span class="stat-icon">📄</span><span class="stat-value" id="s-reports">0</span><span class="stat-label">Reports</span></div>
-        <div class="summary-stat"><span class="stat-icon">⚙️</span><span class="stat-value" id="s-toolcalls">—</span><span class="stat-label">Tool Calls</span></div>
-        <div class="summary-stat"><span class="stat-icon">🌐</span><span class="stat-value" id="s-sources">—</span><span class="stat-label">Sources</span></div>
-        <div class="summary-stat"><span class="stat-icon">🔍</span><span class="stat-value" id="s-searches">—</span><span class="stat-label">Searches</span></div>
-        <div class="summary-stat"><span class="stat-icon">🛰️</span><span class="stat-value" id="s-shodan">—</span><span class="stat-label">Shodan</span></div>
-        <div class="summary-stat"><span class="stat-icon">🧠</span><span class="stat-value" id="s-model">—</span><span class="stat-label">Model</span></div>
       </div>
       <div class="terminal-window">
         <div class="terminal-titlebar"><div class="terminal-dots"><span class="tdot-red"></span><span class="tdot-yellow"></span><span class="tdot-green"></span></div><span class="terminal-title" id="report-title">swarm-report.md</span></div>
-        <div class="terminal-body" id="assessment-view"><span style="color:var(--text-3)">Select a run to view its assessment.</span></div>
+        <div class="terminal-body" id="assessment-view">
+          <div style="color:var(--text-3);font-size:0.82rem;line-height:1.6;">
+            <div style="color:var(--accent);font-weight:600;">$ sirb --status</div>
+            <div style="margin-top:0.5rem;">SIRB Swarm v0.3 — Agentic task orchestration engine</div>
+            <div style="margin-top:0.3rem;color:var(--text-3);">No active runs. Select a worker, paste targets, and launch a swarm investigation.</div>
+            <div style="margin-top:0.3rem;color:var(--text-3);">Past runs are available in the left sidebar.</div>
+            <div style="margin-top:0.5rem;color:var(--accent);">$ <span class="prompt-cursor">▊</span></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="panel-right">
       <h3><span style="color:var(--accent)">▶</span> Launch Scan</h3>
-      <div class="hero-badge"><span class="live-dot"></span> SIRB v0.3</div>
-      <div class="form-group"><label>Method</label><select id="method-select" onchange="toggleMethod()"><option value="mmsi">IMO / MMSI</option><option value="port">Port Scan</option><option value="geo">Geo Location</option></select></div>
-      <div id="method-mmsi" class="method-panel">
-        <div class="form-group" style="display:flex;gap:0.5em;align-items:end;">
-          <div style="flex:1"><label>Number of vessels</label><input id="vessel-count" type="number" min="1" max="20" value="2" onchange="buildVesselInputs()" /></div>
-        </div>
-        <div id="vessel-inputs"></div>
-      </div>
-      <div id="method-port" class="method-panel" style="display:none"><div class="form-group"><label>Port</label><select id="port-select"><option value="tallinn">Tallinn</option><option value="helsinki">Helsinki</option></select></div></div>
-      <div id="method-geo" class="method-panel" style="display:none">
-        <div class="form-group"><label>Latitude</label><input id="geo-lat" placeholder="59.5" /></div>
-        <div class="form-group"><label>Longitude</label><input id="geo-lon" placeholder="24.5" /></div>
-        <div style="display:flex;gap:0.5em;"><div class="form-group" style="flex:1"><label>Radius (km)</label><input id="geo-radius" placeholder="50" value="50" /></div><div class="form-group" style="flex:1"><label>Label</label><input id="geo-label" placeholder="Tallinn Bay" /></div></div>
-      </div>
-      <div class="form-group"><label>Mode</label><select id="mode-select"><option value="fast">Fast (~2 min)</option><option value="deep">Deep (~10 min)</option></select></div>
-      <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.6em;"><label style="font-size:0.75rem;color:#58a6ff;white-space:nowrap;font-weight:500;">👤 Profile:</label><select id="profile-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:auto;min-width:140px;" onchange="onProfileChange()"><option value="">default</option><option value="local">local</option><option value="research">research</option><option value="shipcrawler">shipcrawler</option></select></div>
-      <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.6em;"><label style="font-size:0.75rem;color:#58a6ff;white-space:nowrap;font-weight:500;">🧠 Model:</label><select id="model-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:auto;min-width:170px;max-width:260px;"><option value="">Loading models...</option></select></div>
+      <div class="form-group"><label>Worker</label><select id="worker-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;" onchange="onWorkerChange()"><option value="">Loading...</option></select></div>
+      <!-- Dynamic form rendered from worker schema -->
+      <div id="worker-form"></div>
+      <!-- Parse preview -->
+      <div id="parse-preview" style="display:none;"></div>
+      <div class="form-group"><label>Model</label><select id="model-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="">Loading models...</option></select></div>
       <div class="btn-row"><button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button><button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button></div>
       <hr style="border-color:var(--border);margin:1em 0;" />
-      <h4 style="font-size:0.8em;color:var(--text-2);margin-bottom:0.5em;">Vessel Positions</h4>
-      <div id="map"></div>
-    </div>
+      <div id="globe-container" style="position:sticky;bottom:0;width:100%;height:200px;border-radius:8px;overflow:hidden;margin-top:auto;"></div>
   </div>
 </div>
 <script>
 const AGENT_COLORS=["#f85149","#58a6ff","#3fb950","#d2a8ff","#f0883e","#79c0ff","#ff7b72","#a5d6ff"];
-let currentRunId=null,map=null,markers=[],reportCache={};
+let currentRunId=null,reportCache={};
+var _userScrolledSIRB=false;
+function initSirbAutoScroll(){const av=document.getElementById("assessment-view");if(!av)return;av.addEventListener("scroll",function(){var threshold=50;var atBottom=av.scrollHeight-av.scrollTop-av.clientHeight<threshold;_userScrolledSIRB=!atBottom;});}
+setTimeout(initSirbAutoScroll,500);
 const sseEl=document.getElementById("sse-status"),evtSource=new EventSource("/events");
 evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status";};
 evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
-evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.data)liveStats(d.data)}catch(_){}};
-function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){if(k==="agents")continue;const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}const ac=document.getElementById("agent-cards");if(!ac)return;ac.innerHTML="";if(!d.agents||!d.agents.length)return;d.agents.forEach(a=>{const sc=a.status==="done"?"#3fb950":a.status==="running"?"#58a6ff":"#f85149";const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";ac.innerHTML+='<div class="agent-card"><div class="ac-header"><span>'+icon+" "+a.label+'</span><span class="ac-status" style="color:'+sc+'">'+a.status+"</span></div><div class=\"ac-activity\">"+(a.activity||"Waiting\u2026")+"</div></div>"});const av=document.getElementById("assessment-view");if(!av)return;if(d.Status==="running"&&d.run_id===currentRunId&&!reportCache.swarm){let h='<div style="padding:0.3rem 0;font-family:JetBrains Mono,monospace;font-size:0.75rem;line-height:1.5;">';d.agents.forEach((a,i)=>{const c=AGENT_COLORS[i%AGENT_COLORS.length];const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";const lines=(a.activity||"Waiting...").split("\n");lines.forEach(l=>{const t=l.trim();if(!t)return;h+='<div style="display:flex;gap:0.5rem;"><span style="color:'+c+';font-weight:600;flex-shrink:0;">['+a.label+']</span><span style="color:var(--text-2);overflow:hidden;text-overflow:ellipsis;">'+t+'</span></div>'})});h+="</div>";av.innerHTML=h}}
+evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type=="stats"&&d.data){if(!currentRunId||d.data.run_id!==currentRunId)return;liveStats(d.data)}}catch(_){}};
+function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){if(k==="agents")continue;const c=k=="Failed"||k=="Error"?"var(--red)":k=="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}const ac=document.getElementById("agent-cards");if(!ac)return;ac.innerHTML="";if(!d.agents||!d.agents.length)return;d.agents.forEach(a=>{const st=a.status=="success"?"done":a.status;const sc=st=="done"?"#3fb950":st=="running"?"#58a6ff":"#f85149";const icon=st=="done"?"✅":st=="running"?"⏳":"❌";ac.innerHTML+='<div class="agent-card"><div class="ac-header"><span>'+icon+" "+a.label+'</span><span class="ac-status" style="color:'+sc+'">'+st+'</span></div><div class="ac-activity">'+(a.activity||"Waiting\u2026")+'</div></div>'});const av=document.getElementById("assessment-view");if(!av)return;if(d.Status=="running"&&d.run_id===currentRunId&&!reportCache.swarm){let h='<div style="padding:0.3rem 0;font-family:JetBrains Mono,monospace;font-size:0.75rem;line-height:1.5;">';d.agents.forEach((a,i)=>{const c=AGENT_COLORS[i%AGENT_COLORS.length];const st=a.status=="success"?"done":a.status;const icon=st=="done"?"✅":st=="running"?"⏳":"❌";const lines=(a.activity||"Waiting...").split("\n");lines.forEach(l=>{const t=l.trim();if(!t)return;h+='<div style="display:flex;gap:0.5rem;"><span style="color:'+c+';font-weight:600;flex-shrink:0;">['+a.label+']</span><span style="color:var(--text-2);overflow:hidden;text-overflow:ellipsis;">'+t+'</span></div>'})});h+="</div>";av.innerHTML=h;if(!_userScrolledSIRB)av.scrollTop=av.scrollHeight}}
 async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 
-async function selectRun(rid){currentRunId=rid;document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};document.getElementById("report-tabs").style.display="";switchTab("swarm");const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}renderTab("swarm");loadVessels(rid);fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{document.getElementById("s-phases").textContent=d.phases||"0";document.getElementById("s-duration").textContent=d.duration||"—";document.getElementById("s-reports").textContent=d.reports||"0";document.getElementById("s-toolcalls").textContent=d.tool_calls||"—";document.getElementById("s-sources").textContent=d.sources||"—";document.getElementById("s-searches").textContent=d.searches||"—";document.getElementById("s-shodan").textContent=d.shodan||"—";document.getElementById("s-model").textContent=d.model||"—"}).catch(()=>{});document.getElementById("final-summary").style.display="flex"}
+async function selectRun(rid){currentRunId=rid;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const workerName=tr.worker||"shipcrawler";const reportTabs=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/report-tabs").then(x=>x.json()).catch(()=>[{id:"swarm",label:"Swarm",icon:"📋",type:"file",path:"swarm-report.md"}]);await renderReportTabs(reportTabs,rid,workerName);document.getElementById("report-tabs").style.display="";switchTab("swarm");renderTab("swarm");const statsSchema=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/stats-schema").then(x=>x.json()).catch(()=>[{key:"tool_calls",icon:"⚙️",label:"Tool Calls"},{key:"duration",icon:"⏱",label:"Duration"},{key:"model",icon:"🧠",label:"Model"}]);const ss=document.getElementById("final-summary");ss.innerHTML=statsSchema.map(s=>'<div class="summary-stat"><span class="stat-icon">'+s.icon+'</span><span class="stat-value" id="s-'+s.key+'">—</span><span class="stat-label">'+s.label+'</span></div>').join("");fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{statsSchema.forEach(s=>{const el=document.getElementById("s-"+s.key);if(el)el.textContent=d[s.key]||"—"})}).catch(()=>{});document.getElementById("final-summary").style.display="flex";showExecutiveSummary(rid)}
+async function showExecutiveSummary(rid){try{const r=await fetch("/run/"+rid+"/targets");const targets=await r.json();if(!targets.length)return;let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.82rem;line-height:1.6;"><div style="color:var(--accent);font-weight:600;margin-bottom:0.5rem;">$ sirb --summary '+rid+'</div>';for(const t of targets){const fr=await fetch("/run/"+rid+"/vessel/"+t.target+"/analyst-report.md");const text=await fr.text();const m=text.match(/##\s*EXECUTIVE\s*SUMMARY\s*\n([\s\S]*?)(?:\n##|\n---|\n\*\*Overall)/i);if(m){let summary=m[1].trim().split("\n\n")[0].trim();summary=summary.replace(/\*\*/g,"").replace(/\[.*?\]/g,"").substring(0,500);const warnings=[];if(/shadow\s*fleet|dark\s*fleet/i.test(text))warnings.push("🔴 SHADOW FLEET");if(/sanctioned|sanctions/i.test(text))warnings.push("🟡 SANCTIONED");if(/AIS\s*shutdown|AIS\s*dark|AIS\s*off/i.test(text))warnings.push("🟠 AIS DARK");if(/kinetic|drone|attack|strike/i.test(text))warnings.push("💥 KINETIC THREAT");if(/casualty|repairing/i.test(text))warnings.push("⚠️ IN CASUALTY");html+='<div style="margin-bottom:0.75rem;padding:0.5rem;border-left:3px solid '+(warnings.length?"var(--red)":"var(--green)")+';background:var(--bg-2);border-radius:0 6px 6px 0;"><div style="font-weight:600;color:var(--accent);">'+t.target+'</div>';if(warnings.length)html+='<div style="margin:0.3rem 0;">'+warnings.join("  ")+"</div>";html+='<div style="color:var(--text-2);margin-top:0.2rem;">'+summary+"...</div></div>"}}html+="</div>";document.getElementById("assessment-view").innerHTML=html}catch(_){}}
+async function renderReportTabs(tabs,rid,workerName){let html="";for(const t of tabs){if(t.type==="file"){html+='<button class="tab-btn" data-tab="'+t.id+'" onclick="switchTab(\''+t.id+'\')">'+t.icon+" "+t.label+"</button>"}else if(t.type==="per_target"){const ep=t.endpoint.replace("{rid}",rid);try{const targets=await fetch(ep).then(x=>x.json());for(const tgt of targets){html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+tgt.target+'\',\''+tgt.files[0]+'\')">'+t.icon+" "+tgt.target.slice(0,12)+"</button>"}}catch(_){}}}document.getElementById("report-tabs").innerHTML=html}
 
-async function loadVessels(rid){const r=await fetch("/run/"+rid+"/vessels");const v=await r.json();let html="";v.forEach(v=>{html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+v.target+'\',\''+v.files[0]+'\')">🚢 '+v.target.slice(0,12)+'</button>'});document.getElementById("vessel-tabs").innerHTML=html;if(!v.length){document.getElementById("connections").disabled=true}}
 
-async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML=marked.parse(text)}
 
-function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab==="swarm"){document.querySelector('[data-tab="swarm"]').classList.add("active");renderTab("swarm")}else if(tab==="connections"){document.querySelector('[data-tab="connections"]').classList.add("active");renderTab("connections")}else{document.getElementById("vessel-tabs").querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
+async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML='<div class="md-content">'+marked.parse(text)+'</div>'}
 
-function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab==="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}else if(tab==="connections"){document.getElementById("report-title").textContent="connections.md"}if(content){view.innerHTML=marked.parse(content)}else if(tab==="swarm"){view.innerHTML='<span style="color:var(--text-3)">Loading swarm report...</span>'}else if(tab==="connections"){view.innerHTML='<span style="color:var(--text-3)">⏳ Connections analysis not ready yet.</span>'}}
-async function loadPositions(rid){const r=await fetch("/run/"+rid+"/positions");const pts=await r.json();if(!map)return;markers.forEach(m=>map.removeLayer(m));markers=[];if(!pts.length)return;pts.forEach(p=>{const m=L.circleMarker([p.lat,p.lon],{radius:6,color:"#f85149",fillColor:"#f85149",fillOpacity:0.8}).addTo(map).bindPopup("<b>"+p.target_id+"</b><br/>Dest: "+p.destination);markers.push(m)});if(pts.length)map.fitBounds(markers.map(m=>m.getLatLng()),{padding:[30,30]})}
-function initMap(){if(!document.getElementById("map"))return;map=L.map("map",{zoomControl:true,attributionControl:false}).setView([59.5,24.5],3);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(map)}
-function toggleMethod(){const m=document.getElementById("method-select").value;document.getElementById("method-mmsi").style.display=m==="mmsi"?"":m==="port"?"none":"none";document.getElementById("method-port").style.display=m==="port"?"":"none";document.getElementById("method-geo").style.display=m==="geo"?"":"none"}
-toggleMethod();
-function buildVesselInputs(){const n=parseInt(document.getElementById("vessel-count").value)||2;const c=document.getElementById("vessel-inputs");let h="";for(let i=1;i<=n;i++){const v=document.getElementById("vi_"+i);h+='<div style="display:flex;align-items:center;gap:0.4em;margin-bottom:0.35em;"><span style="font-size:0.72em;color:var(--text-2);min-width:5em;">Vessel '+i+'</span><input id="vi_'+i+'" placeholder="IMO or MMSI" oninput="this.value=this.value.replace(/\\s+/g,\'\')" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" value="'+(v?v.value:'')+'" /></div>'}c.innerHTML=h}
-buildVesselInputs();
+function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab=="swarm"){var sb=document.querySelector('[data-tab="swarm"]');if(sb)sb.classList.add("active");renderTab("swarm")}else{document.querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
 
-async function launchRun(){const method=document.getElementById("method-select").value;const profile=document.getElementById("profile-select").value;const model=document.getElementById("model-select").value;const mode=document.getElementById("mode-select").value;if(method==="mmsi"){const n=parseInt(document.getElementById("vessel-count").value)||2;let mmsis=[];for(let i=1;i<=n;i++){const v=document.getElementById("vi_"+i);if(v&&v.value.trim())mmsis.push(v.value.trim())}if(!mmsis.length){alert("Enter at least one IMO or MMSI");return}const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"mmsi="+encodeURIComponent(mmsis.join(" "))+"&mode="+encodeURIComponent(mode)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}else if(method==="port"){const port=document.getElementById("port-select").value;const r=await fetch("/run/port",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"port="+encodeURIComponent(port)+"&mode="+encodeURIComponent(mode)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}else if(method==="geo"){const lat=document.getElementById("geo-lat").value.trim();const lon=document.getElementById("geo-lon").value.trim();const radius=document.getElementById("geo-radius").value.trim()||"50";const label=document.getElementById("geo-label").value.trim()||(lat+","+lon);if(!lat||!lon){alert("Enter latitude and longitude");return}const r=await fetch("/run/geo",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"lat="+encodeURIComponent(lat)+"&lon="+encodeURIComponent(lon)+"&radius="+encodeURIComponent(radius)+"&label="+encodeURIComponent(label)+"&profile="+encodeURIComponent(profile)+"&model="+encodeURIComponent(model)});handleLaunchResponse(r)}}
-async function handleLaunchResponse(p){document.getElementById("run-btn").disabled=true;document.getElementById("run-btn").textContent="Running...";document.getElementById("stop-btn").style.display="inline-block";try{const r=await p;const d=await r.json();if(d.run_id){currentRunId=d.run_id;document.getElementById("selected-run").textContent="Run: "+d.run_id;document.getElementById("assessment-view").innerHTML='<span style="color:var(--accent)">⏳ Run started...</span>';setTimeout(loadRuns,1000)}else if(d.error){alert("Error: "+d.error)}}catch(e){alert("Failed: "+e)}document.getElementById("run-btn").disabled=false;document.getElementById("run-btn").textContent="▶ Run"}
+function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab=="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}else if(tab=="connections"){document.getElementById("report-title").textContent="connections.md"}if(content){view.innerHTML='<div class="md-content">'+marked.parse(content)+'</div>'}else if(tab=="swarm"){view.innerHTML='<span style="color:var(--text-3)">Loading swarm report...</span>'}else if(tab=="connections"){view.innerHTML='<span style="color:var(--text-3)">⏳ Connections analysis not ready yet.</span>'}}
+
+
+
+async function loadWorkers(){try{const r=await fetch("/api/workers?_="+Date.now());const data=await r.json();const sel=document.getElementById("worker-select");if(!data.length){sel.innerHTML='<option value="">No workers installed</option>';return}sel.innerHTML=data.map(w=>'<option value="'+w.name+'">'+w.name+(w.description?" — "+w.description:"")+"</option>").join("");if(!sel.value&&data.length)sel.selectedIndex=0;onWorkerChange()}catch(_){document.getElementById("worker-select").innerHTML='<option value="shipcrawler">shipcrawler</option>'}}
+let _workerSchema=null,_parsedTargets=[];
+async function onWorkerChange(){const w=document.getElementById("worker-select").value;if(!w)return;document.getElementById("parse-preview").style.display="none";_parsedTargets=[];try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/schema?_="+Date.now());const schema=await r.json();_workerSchema=schema;renderWorkerForm(schema);const pf=document.getElementById("wf-profile");if(pf){loadProfileModels(pf.value||"")}}catch(_){document.getElementById("worker-form").innerHTML='<div style="color:var(--text-3);font-size:0.78rem;">No form available for this worker</div>'}}
+function renderWorkerForm(schema){if(!schema||!schema.fields){document.getElementById("worker-form").innerHTML="";return}let html="";schema.fields.forEach(f=>{const fid="wf-"+f.name;var onchange="";if(f.name==="profile"){onchange=' onchange="onProfileFormChange()"'}if(f.type==="textarea"){html+='<div class="form-group"><label>'+f.label+'</label><textarea id="'+fid+'" placeholder="'+(f.placeholder||"")+'" style="width:100%;min-height:80px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;resize:vertical;">'+(f.default||"")+'</textarea></div>'}else if(f.type==="select"){html+='<div class="form-group"><label>'+f.label+'</label><select id="'+fid+'"'+onchange+' style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;">'+(f.options||[]).map(o=>'<option value="'+o.value+'"'+(o.value===(f.default||"")?" selected":"")+" >"+o.label+"</option>").join("")+'</select></div>'}else if(f.type==="number"){html+='<div class="form-group"><label>'+f.label+'</label><input id="'+fid+'" type="number" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" /></div>'}else{html+='<div class="form-group"><label>'+f.label+'</label><input id="'+fid+'" type="text" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" /></div>'}if(f.parse){html+='<button class="btn" style="margin-top:0.3rem;width:100%;" onclick="parseInput(\''+f.name+'\')">🔍 Parse</button>'}});document.getElementById("worker-form").innerHTML=html}
+function onProfileFormChange(){const el=document.getElementById("wf-profile");if(el)loadProfileModels(el.value)}
+async function parseInput(fieldName){const w=document.getElementById("worker-select").value;const input=document.getElementById("wf-"+fieldName).value;if(!input.trim()){alert("Enter some text first");return}try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/parse",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"input="+encodeURIComponent(input)});const data=await r.json();_parsedTargets=data.targets||[];showParsePreview(_parsedTargets)}catch(e){alert("Parse failed: "+e)}}
+function showParsePreview(targets){const el=document.getElementById("parse-preview");if(!targets.length){el.style.display="block";el.innerHTML='<div style="color:var(--red);font-size:0.78rem;padding:0.5rem;">No targets detected.</div>';return}let html='<div style="background:var(--bg-3);border:1px solid var(--border);border-radius:6px;padding:0.5rem;margin-top:0.5rem;"><div style="font-size:0.75rem;color:var(--accent);font-weight:600;margin-bottom:0.3rem;">Found '+targets.length+' target'+(targets.length>1?"s":"")+':</div>';html+='<table style="width:100%;font-size:0.75rem;font-family:JetBrains Mono,monospace;"><thead><tr><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">#</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Type</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Target</th></tr></thead><tbody>';targets.forEach((t,i)=>{html+='<tr style="border-bottom:1px solid var(--border);"><td style="padding:0.2rem 0.4rem;color:var(--text-3);">'+(i+1)+'</td><td style="padding:0.2rem 0.4rem;color:var(--accent);">'+t.type+'</td><td style="padding:0.2rem 0.4rem;color:var(--text-1);">'+t.target+'</td></tr>'});html+='</tbody></table></div>';el.style.display="block";el.innerHTML=html}
+async function launchRun(){const worker=document.getElementById("worker-select").value;const model=document.getElementById("model-select").value;if(!worker){alert("Select a worker first");return}if(_parsedTargets.length===0&&_workerSchema&&_workerSchema.parse){alert("Click Parse first to verify targets before running");return}if(_parsedTargets.length===0){alert("No targets detected — parse your input first");return}const targets=_parsedTargets.map(t=>t.target).join(" ");const params={mmsi:targets,worker,mode:"deep",profile:"",model};if(_workerSchema&&_workerSchema.fields){_workerSchema.fields.forEach(f=>{const el=document.getElementById("wf-"+f.name);if(el){if(f.name==="targets"){params.mmsi=_parsedTargets.map(t=>t.target).join(" ")}else if(f.name==="mode"){params.mode=el.value}else if(f.name==="profile"){params.profile=el.value}else{params[f.name]=el.value}}})}const body=Object.entries(params).map(([k,v])=>k+"="+encodeURIComponent(v)).join("&");const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});handleLaunchResponse(r)}
+async function handleLaunchResponse(p){document.getElementById("run-btn").disabled=true;document.getElementById("run-btn").textContent="Running...";document.getElementById("stop-btn").style.display="inline-block";try{const r=await p;const d=await r.json();if(d.run_id){currentRunId=d.run_id;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+d.run_id;reportCache={};document.getElementById("report-tabs").style.display="none";document.getElementById("report-tabs").innerHTML="";document.getElementById("final-summary").style.display="none";document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";document.getElementById("assessment-view").innerHTML='<span style="color:var(--accent)">⏳ Run started... agents initializing.</span>';setTimeout(loadRuns,1000)}else if(d.error){alert("Error: "+d.error)}}catch(e){alert("Failed: "+e)}document.getElementById("run-btn").disabled=false;document.getElementById("run-btn").textContent="▶ Run"}
 async function stopRun(){if(!currentRunId)return;await fetch("/run/"+currentRunId+"/stop",{method:"POST"});document.getElementById("stop-btn").style.display="none";document.getElementById("selected-run").textContent="Stopped: "+currentRunId;setTimeout(loadRuns,1000)}
 async function loadProfileModels(profile){try{const r=await fetch("/api/profiles/models?_="+Date.now());const data=await r.json();const pk=profile||"";const ms=data[pk]||[];const sel=document.getElementById("model-select");sel.innerHTML=ms.map(m=>'<option value="'+m.value+'">'+m.label+"</option>").join("");if(!sel.value)sel.selectedIndex=0}catch(_){document.getElementById("model-select").innerHTML='<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>'}}
-function onProfileChange(){const p=document.getElementById("profile-select").value;loadProfileModels(p)}
-loadRuns();loadProfileModels("");setInterval(loadRuns,5000);
-initMap();
+function goHome(){currentRunId=null;document.getElementById("sirb-hero").style.display="";document.getElementById("selected-run").textContent="No run selected";document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));document.getElementById("report-tabs").style.display="none";document.getElementById("report-tabs").innerHTML="";document.getElementById("final-summary").style.display="none";document.getElementById("final-summary").innerHTML="";document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";document.getElementById("assessment-view").innerHTML='<div style="color:var(--text-3);font-size:0.82rem;line-height:1.6;"><div style="color:var(--accent);font-weight:600;">$ sirb --status</div><div style="margin-top:0.5rem;">SIRB Swarm v0.3 — Agentic task orchestration engine</div><div style="margin-top:0.3rem;color:var(--text-3);">No active runs. Select a worker, paste targets, and launch a swarm investigation.</div><div style="margin-top:0.3rem;color:var(--text-3);">Past runs are available in the left sidebar.</div><div style="margin-top:0.5rem;color:var(--accent);">$ <span class="prompt-cursor">▊</span></div></div>';reportCache={}}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);document.querySelectorAll('.theme-pill').forEach(p=>p.classList.toggle('active',p.dataset.theme===t));try{localStorage.setItem('sirb-theme',t)}catch(_){}}
+function loadTheme(){try{const t=localStorage.getItem('sirb-theme')||'dark';applyTheme(t)}catch(_){applyTheme('dark')}}
+loadTheme();
+loadRuns();loadProfileModels("");loadWorkers();setInterval(loadRuns,5000);
+// Clear live stats on page load — only show when a run is selected/started
+document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";
+</script>
+<footer style="text-align:center;padding:0.5rem;font-size:0.7rem;color:var(--text-3);border-top:1px solid var(--border);">Built by Ahmed Nagi Nasr · SIRB v0.3 · AI Agent</footer>
+<script>
+// Globe — Three.js rotating particle globe
+(function(){if(typeof THREE==='undefined')return;const c=document.getElementById('globe-container');if(!c)return;const W=c.clientWidth||240,H=200;const sc=new THREE.Scene();const cam=new THREE.PerspectiveCamera(45,W/H,0.1,1000);cam.position.z=3.2;const r=new THREE.WebGLRenderer({alpha:true,antialias:true});r.setSize(W,H);r.setPixelRatio(Math.min(window.devicePixelRatio,2));c.appendChild(r.domElement);const gR=1.4,pC=1800,pos=new Float32Array(pC*3),col=new Float32Array(pC*3);for(let i=0;i<pC;i++){const t=Math.random()*Math.PI*2,p=Math.acos(2*Math.random()-1),rr=gR+(Math.random()-0.5)*0.04;pos[i*3]=rr*Math.sin(p)*Math.cos(t);pos[i*3+1]=rr*Math.cos(p);pos[i*3+2]=rr*Math.sin(p)*Math.sin(t);const b=0.4+Math.random()*0.6;col[i*3]=0.3*b;col[i*3+1]=0.55*b;col[i*3+2]=1.0*b;}const gG=new THREE.BufferGeometry();gG.setAttribute('position',new THREE.BufferAttribute(pos,3));gG.setAttribute('color',new THREE.BufferAttribute(col,3));const gM=new THREE.PointsMaterial({size:0.035,vertexColors:true,transparent:true,opacity:0.95,blending:THREE.AdditiveBlending,depthWrite:false});const gl=new THREE.Points(gG,gM);sc.add(gl);const rM=new THREE.LineBasicMaterial({color:0x3273ff,transparent:true,opacity:0.12});for(let i=0;i<6;i++){const lat=(i/6)*Math.PI-Math.PI/2+Math.PI/12,rL=gR*Math.cos(lat)*1.01,y=gR*Math.sin(lat)*1.01,seg=48,rp=[];for(let j=0;j<=seg;j++){const t=(j/seg)*Math.PI*2;rp.push(rL*Math.cos(t),y,rL*Math.sin(t));}const rg=new THREE.BufferGeometry();rg.setAttribute('position',new THREE.Float32BufferAttribute(rp,3));sc.add(new THREE.Line(rg,rM));}for(let i=0;i<4;i++){const t=(i/4)*Math.PI,rp=[],seg=48;for(let j=0;j<=seg;j++){const p=(j/seg)*Math.PI*2,rr=gR*1.01;rp.push(rr*Math.cos(p)*Math.cos(t),rr*Math.sin(p),rr*Math.cos(p)*Math.sin(t));}const rg=new THREE.BufferGeometry();rg.setAttribute('position',new THREE.Float32BufferAttribute(rp,3));sc.add(new THREE.Line(rg,rM));}const sC=600,sP=new Float32Array(sC*3);for(let i=0;i<sC;i++){const t=Math.random()*Math.PI*2,p=Math.acos(2*Math.random()-1),rr=1.8+Math.random()*1.8;sP[i*3]=rr*Math.sin(p)*Math.cos(t);sP[i*3+1]=rr*Math.cos(p);sP[i*3+2]=rr*Math.sin(p)*Math.sin(t);}const sG=new THREE.BufferGeometry();sG.setAttribute('position',new THREE.BufferAttribute(sP,3));const sM=new THREE.PointsMaterial({size:0.015,color:0x4a8aff,transparent:true,opacity:0.6,blending:THREE.AdditiveBlending,depthWrite:false});const sp=new THREE.Points(sG,sM);sc.add(sp);const gg=new THREE.SphereGeometry(gR*1.25,32,32),gm=new THREE.MeshBasicMaterial({color:0x3273ff,transparent:true,opacity:0.06,side:THREE.BackSide,blending:THREE.AdditiveBlending});const gw=new THREE.Mesh(gg,gm);sc.add(gw);function a(){requestAnimationFrame(a);gl.rotation.y+=0.004;sp.rotation.y+=0.002;gw.rotation.y+=0.001;r.render(sc,cam);}a();window.addEventListener('resize',()=>{const w=c.clientWidth||240;cam.aspect=w/H;cam.updateProjectionMatrix();r.setSize(w,H);});})();
 </script>
 </body>
 </html>"""
@@ -1638,11 +1766,22 @@ initMap();
                     t = json.loads(tr.read_text())
                     agents_dict = t.get("agents", {})
                     targets = t.get("targets", [])
-                    done = sum(1 for a in agents_dict.values() if a.get("status") == "done")
+                    done = sum(1 for a in agents_dict.values() if a.get("status") in ("done", "success"))
                     failed = sum(1 for a in agents_dict.values() if a.get("status") in ("failed", "timeout", "error"))
                     total = len(targets)
 
-                    # Build per-agent status with last log line
+                    # Import stream_formatter for clean output processing
+                    try:
+                        from .stream_formatter import process_output_line as _format_line
+                    except ImportError:
+                        try:
+                            import sys as _sys
+                            _sys.path.insert(0, str(Path(__file__).parent))
+                            from stream_formatter import process_output_line as _format_line
+                        except ImportError:
+                            _format_line = None
+
+                    # Build per-agent status with formatted log lines
                     agents_list = []
                     vessels_dir = d / rid / "vessels"
                     for idx, ti in enumerate(targets):
@@ -1651,20 +1790,32 @@ initMap();
                         label = f"agent{idx+1}"
                         activity = ""
                         if status == "running":
-                            # Read last meaningful lines from live log
                             log_path = vessels_dir / f"{ti}.log"
                             if log_path.exists():
-                                lines = log_path.read_text(errors="replace").strip().split("\n")
-                                # Take last 3 non-empty, non-separator lines
-                                meaningful = []
-                                for ln in reversed(lines):
-                                    ln = ln.strip()
-                                    if ln and not ln.startswith("─") and ln and len(ln) > 2:
-                                        meaningful.append(ln[:130])
-                                        if len(meaningful) >= 3:
-                                            break
-                                activity = "\n".join(reversed(meaningful))
-                        elif status == "done":
+                                raw_lines = log_path.read_text(errors="replace").strip().split("\n")
+                                # Only last 25 lines to avoid overwhelming SSE
+                                raw_lines = raw_lines[-25:]
+                                if _format_line:
+                                    events = []
+                                    for ln in raw_lines:
+                                        evt = _format_line(ln)
+                                        if evt is not None:
+                                            icon = evt.get("icon", "").strip()
+                                            msg = evt.get("message", "").strip()
+                                            if msg:
+                                                events.append(f"{icon} {msg}" if icon else msg)
+                                    activity = "\n".join(events[-20:])
+                                else:
+                                    meaningful = []
+                                    for ln in raw_lines:
+                                        ln = ln.strip()
+                                        if not ln or len(ln) < 2:
+                                            continue
+                                        if ln.startswith(("─", "╭", "├", "└", "│", "╰")):
+                                            continue
+                                        meaningful.append(ln[:200])
+                                    activity = "\n".join(meaningful[-20:])
+                        elif status in ("done", "success"):
                             activity = "✅ Complete"
                         elif status in ("failed", "timeout", "error"):
                             activity = "❌ Failed"
@@ -1700,7 +1851,13 @@ initMap();
 
 
 def _get_runs_dir(args):
-    run_dir = getattr(args, "run_dir", None) or "~/hermes-vault/sirb-reports"
+    # Hermes profile sandbox sets HOME to a profile-specific dir, but reports
+    # live in the real home. Use HERMES_REAL_HOME to resolve ~ correctly.
+    real_home = os.environ.get("HERMES_REAL_HOME") or os.path.expanduser("~")
+    run_dir = getattr(args, "run_dir", None) or os.path.join(real_home, "hermes-vault", "sirb-reports")
+    # If run_dir starts with ~, expand using real_home
+    if run_dir.startswith("~"):
+        run_dir = os.path.join(real_home, run_dir[2:])
     return Path(run_dir).expanduser() / "runs"
 
 

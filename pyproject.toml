@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sirb"
-version = "0.1.0"
+version = "0.4.1"
 description = "Sirb (سرب) — agnostic multi-agent task swarm"
 authors = [
     {name = "Ahmed Nagi Nasr", email = "ahmed.nasr@taltech.ee"},
@@ -12,6 +12,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
+    "Jinja2>=3.1",
 ]
 
 [project.scripts]
@@ -20,3 +21,6 @@ sirb = "sirb.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sirb*"]
+
+[tool.setuptools.package-data]
+sirb = ["templates/*.j2", "cli/stream_formatter.py"]

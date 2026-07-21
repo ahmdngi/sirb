@@ -4,7 +4,7 @@
   <img src="sirb/cli/logo.png" alt="Sirb Logo" width="300">
 </p>
 
-**v0.2.0** — Lightweight, zero-framework-dependency task orchestration engine.
+**v0.4.1** — Lightweight, zero-framework-dependency task orchestration engine.
 
 Manages N worker agents executing tasks concurrently from a thread-safe queue,
 routes them by type to registered workers, persists findings on a shared
@@ -13,6 +13,8 @@ blackboard with pheromone decay, and checkpoints state to disk for crash recover
 > **Agnostic by design.** Sirb does not know what a vessel, person, or domain is.
 > Workers (`SirbWorker` subclasses) bring domain logic — ShipCrawler, personnel
 > OSINT, port authority scrapers — each in their own installable package.
+> Workers declare their own input forms via `input_schema()` and parse raw input
+> via `parse_targets()`. The dashboard renders forms dynamically.
 
 [![GitHub Release](https://img.shields.io/github/v/release/ahmdngi/sirb?style=flat-square)](https://github.com/ahmdngi/sirb/releases)
 [![License](https://img.shields.io/badge/license-MIT-yellow?style=flat-square)]()
@@ -75,14 +77,14 @@ sirb run
 | **Multi-Run Trends** | Persists assessment summaries per run. Compares latest run against previous — shows severity deltas, finding type changes, new targets. Output as markdown. |
 | **Trigger Predicates** | Register predicates on the blackboard. When a finding matches, an action fires (e.g., `alert_aggregator`). Predicates match on any finding field. |
 | **Assessment Markdown** | Structured report with unique targets, severity distribution, finding types, risk tiers, shared sources, top findings. |
-| **Live Dashboard** | Full web UI at `:8502`. Three-panel layout: run history sidebar, live SSE stream + assessment viewer, launch controls + Leaflet vessel map. Supports 3 scan methods (Direct MMSI, Port Scan, Geo Location), Fast/Deep mode, Start/Stop controls. Zero deps beyond stdlib. |
+|| **Live Dashboard** | Full web UI at `:8502`. Three-panel layout: run history sidebar, live SSE stream + assessment viewer, dynamic launch panel with worker dropdown. Workers declare their own forms via `input_schema()` — no hardcoded scan methods or vessel map. Dynamic stats bar from `stats_schema()`, dynamic report tabs from `report_tabs()`. |
 
 ### Agnosticism (guaranteed)
 | Commitment | Evidence |
 |------------|----------|
 | **No domain-specific code in core/** | Audit clean. Zero references to vessel, MMSI, IMO, Shodan, Equasis, VSAT, shadow fleet, LinkedIn, personnel. |
-| **No domain-specific code in cli/** | Audit clean. CLI has no domain knowledge. |
-| **Workers are external** | Sirb never imports a worker's Python modules. Workers communicate via subprocess or HTTP. |
+|| **No domain-specific code in cli/** | Audit clean. CLI has no domain knowledge. Dashboard discovers workers via `WorkerRegistry.discover_entry_points()` — no hardcoded worker imports. |
+| **Workers are external** | Sirb never imports a worker's Python modules. Workers are pip-installed packages discovered via `sirb_workers` entry points. Dashboard `/api/workers` endpoint lists installed workers dynamically. |
 | **Generic data model** | `Task`, `Result`, `Finding` — no vessel/domain fields. `target_id` and `target_type` are free-form strings. |
 
 ## Architecture
@@ -118,11 +120,12 @@ sirb run
               │   CorrelationEngine    │──→ group_by_detail_key()
               │   Aggregator           │──→ render_markdown()
               │   Webhook POST         │──→ assessment JSON → URL
-              │   Dashboard            │──→ full UI at :8100
+              │   Dashboard            │──→ full UI at :8502
               │   (Run History)        │──→ past runs with timestamps
-              │   (Launch Panel)       │──→ MMSI / Port / Geo × Fast/Deep
-              │   (Vessel Map)         │──→ Leaflet OSM positions
-              │   (Stop Control)       │──→ kill running scans from browser
+              │   (Launch Panel)       │──→ worker dropdown + dynamic form
+              │   (SSE Stream)         │──→ live agent output
+              │   (Stats Bar)          │──→ dynamic from worker stats_schema()
+              │   (Report Tabs)        │──→ dynamic from worker report_tabs()
               └────────────────────────┘
 ```
 
@@ -132,7 +135,8 @@ sirb run
 pip install git+https://github.com/ahmdngi/sirb.git
 ```
 
-No dependencies beyond Python stdlib (3.11+).
+No dependencies beyond Python stdlib — Jinja2 is optional (declared in pyproject.toml,
+inline markdown fallback if not installed).
 
 ## Commands
 
@@ -195,6 +199,24 @@ class MyWorker(SirbWorker):
 
     def rate_limits(self) -> dict[str, int]:
         return {"api-source": 5}   # 5 req/min
+
+    def input_schema(self) -> dict:
+        return {
+            "fields": [
+                {"name": "targets", "label": "Targets", "type": "textarea",
+                 "placeholder": "Paste anything...", "parse": True},
+                {"name": "mode", "label": "Mode", "type": "select",
+                 "options": [{"value": "fast", "label": "Fast"},
+                             {"value": "deep", "label": "Deep"}],
+                 "default": "deep"},
+            ],
+            "parse": True,
+        }
+
+    def parse_targets(self, raw_input: str) -> list[dict]:
+        """Parse raw input into structured targets for preview."""
+        return [{"target": t.strip(), "type": "auto"}
+                for t in raw_input.split(",") if t.strip()]
 ```
 
 Package separately and pip-install. Sirb will auto-discover it via entry points.
@@ -204,7 +226,7 @@ Package separately and pip-install. Sirb will auto-discover it via entry points.
 | Module | Description |
 |--------|-------------|
 | `sirb.core.models` | `Task`, `Result`, `Finding`, `TaskStatus` — fully agnostic |
-| `sirb.core.worker_base` | `SirbWorker` ABC — `execute()`, `discover()`, `validate()`, `rate_limits()` |
+|| `sirb.core.worker_base` | `SirbWorker` ABC — `execute()`, `discover()`, `validate()`, `rate_limits()`, `input_schema()`, `parse_targets()`, `stats_schema()`, `extract_stats()`, `report_tabs()` |
 | `sirb.core.task_queue` | Thread-safe priority queue with deps, retry, dedup, serialization |
 | `sirb.core.registry` | Worker discovery: entry points, config, package scan, filesystem |
 | `sirb.core.router` | `Task.worker` → `SirbWorker` dispatch |
@@ -228,7 +250,85 @@ src/sirb/ ── 70 tests (core + queue + dedup + throttling + triggers +
 
 | Worker | Repo | Description |
 |--------|------|-------------|
-| ShipCrawler | [shipcrawler-worker](https://github.com/ahmdngi/shipcrawler-worker) | Vessel OSINT via Equasis + AIS + Shodan/Web pipeline |
+| ShipCrawler | [shipcrawler-worker](https://github.com/ahmdngi/shipcrawler-worker) | Vessel OSINT via Equasis + AIS + Shodan/Web pipeline (fast mode) or hermes chat agent (agent mode) |
+
+## Dashboard (v0.3.0+)
+
+The dashboard at `:8502` now uses the **core kernel** (TaskQueue + WorkerPool + Blackboard) instead of raw subprocesses.
+
+### Worker Discovery
+
+The dashboard auto-discovers installed workers via pip entry points:
+
+```
+GET /api/workers → [{"name": "shipcrawler", "description": "Vessel OSINT..."}]
+```
+
+A **Worker dropdown** in the launch panel lists all installed workers. When a worker is selected, the dashboard fetches its input form schema:
+
+```
+GET /api/workers/<name>/schema → {"fields": [...], "parse": true}
+```
+
+The form renders dynamically — textarea for raw input, selects for mode/profile, etc. Each worker defines its own fields via `input_schema()`.
+
+### Parse Before Run
+
+When the worker's schema has `parse: true`, a **🔍 Parse** button appears below the textarea. The user pastes raw text (any format), clicks Parse, and the worker's `parse_targets()` extracts structured targets:
+
+```
+POST /api/workers/<name>/parse → {"targets": [{"target": "9297890", "type": "IMO"}, ...]}
+```
+
+A preview table shows the extracted targets. The user verifies before clicking Run. This prevents typos and wrong-format inputs from wasting a 10-minute scan.
+
+### Dynamic Stats Bar
+
+Workers declare their own stats fields via `stats_schema()` and `extract_stats()`:
+
+```
+GET /api/workers/<name>/stats-schema → [{"key": "shodan", "icon": "🛰️", "label": "Shodan"}, ...]
+GET /run/<rid>/stats → {"tool_calls": 71, "shodan": 10, ...}
+```
+
+The stats bar renders dynamically from the worker's schema — no hardcoded vessel/OSINT stats in sirb.
+
+### Dynamic Report Tabs
+
+Workers declare their own report tabs via `report_tabs()`:
+
+```
+GET /api/workers/<name>/report-tabs → [{"id": "swarm", "type": "file", ...}, {"id": "vessel", "type": "per_target", ...}]
+```
+
+- `type: "file"` — serves a single file (e.g. `swarm-report.md`)
+- `type: "per_target"` — creates sub-tabs, one per target (e.g. per-vessel reports)
+
+### Dashboard Layout (v0.3.0)
+
+Three-column layout matching shipcrawler:
+
+| Column | Contents |
+|--------|----------|
+| **Left — Sidebar** | Run history with timestamps and target counts |
+| **Center** | Hero (badge + gradient h1 + description) → Terminal → Stats bar → Report tabs |
+| **Right — Launch panel** | Worker dropdown, dynamic form, Model dropdown, Run/Stop buttons, rotating globe |
+
+- **Theme switcher**: Dark / Light / Classic with localStorage persistence
+- **GitHub link** in nav
+- **Clickable logo** — `goHome()` returns to clean landing page
+- **Terminal welcome message** on landing page (`$ sirb --status`)
+- **Executive summary** with warning badges (🔴 SHADOW FLEET, 🟡 SANCTIONED, etc.) when viewing runs
+- **SSE filters** by selected run — no stale data on page refresh
+- **Rotating globe** (Three.js particle globe) at bottom of right panel
+
+### Adding a New Worker
+
+1. Create a new repo with a `SirbWorker` subclass
+2. Implement `execute()`, `input_schema()`, `parse_targets()`, `stats_schema()`, `extract_stats()`, `report_tabs()`
+3. Add `[project.entry-points.sirb_workers]` in `pyproject.toml`
+4. `pip install` it
+5. It automatically appears in the dashboard Worker dropdown — no sirb code changes needed
 
 ## License
 

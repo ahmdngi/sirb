@@ -1,0 +1,91 @@
+{# Sirb Vessel Analyst Report — renders from structured assessment data.
+   Agnostic labels. Vessel context provided via target_type='vessel' findings.
+   Vars: assessment (dict from Aggregator.assess()), title. #}
+# {{ title }}
+
+**Generated:** {{ assessment.generated_at }}
+**Target type:** {{ assessment.target_type }}
+**Unique targets:** {{ assessment.unique_targets }}
+
+---
+
+## Overview
+
+| Metric | Value |
+|--------|-------|
+{% if assessment.unique_targets > 0 -%}
+| Unique targets | {{ assessment.unique_targets }} |
+{% for sev in ["critical", "high", "medium", "low", "info"] -%}
+{% set n = assessment.risk_tiers.get(sev, 0) %}
+{% if n > 0 -%}
+{% set pct = (n / assessment.unique_targets * 100)|round if assessment.unique_targets else 0 %}
+| {{ sev|capitalize }} severity targets | {{ n }} ({{ pct }}%) |
+{% endif -%}
+{% endfor -%}
+{% else -%}
+| Unique targets | 0 |
+{% endif %}
+
+---
+
+## Severity Distribution
+
+| Severity | Count |
+|----------|-------|
+{% for sev, cnt in assessment.severity.items() -%}
+| {{ sev|capitalize }} | {{ cnt }} |
+{% endfor %}
+
+---
+
+## Finding Types
+
+| Type | Count |
+|------|-------|
+{% for ftype, cnt in assessment.finding_types.items() -%}
+| {{ ftype }} | {{ cnt }} |
+{% endfor %}
+
+{% if assessment.shared_sources %}
+---
+
+## Shared Sources
+
+{% for s in assessment.shared_sources %}
+- **{{ s.value }}**: {{ s.count }} targets — {{ s.targets[:5]|join(", ") }}
+{% endfor %}
+{% endif %}
+
+{% if assessment.shared_target_types %}
+---
+
+## Shared Target Types
+
+{% for t in assessment.shared_target_types %}
+- **{{ t.value }}**: {{ t.count }} targets
+{% endfor %}
+{% endif %}
+
+---
+
+## Top Findings by Severity
+
+| Target | Type | Severity | Detail |
+|--------|------|----------|--------|
+{% for f in assessment.top_findings -%}
+| {{ f.target_id[:20] }} | {{ f.finding_type }} | {{ f.severity }} | {{ f.detail|tojson|truncate(60) }} |
+{% endfor %}
+
+---
+
+## Exposure Statistics
+
+| Metric | Value |
+|--------|-------|
+| Targets with positive findings | {{ assessment.exposure_stats.positive_findings }} |
+| Total targets | {{ assessment.exposure_stats.total_targets }} |
+| Exposure rate | {{ assessment.exposure_stats.rate }}% |
+
+---
+
+*End of Assessment — Sirb Aggregator*

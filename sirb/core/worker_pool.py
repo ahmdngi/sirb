@@ -158,11 +158,14 @@ class WorkerPool:
         else:
             self._consecutive_failures.pop(worker_name, None)
 
-        # Validate
+        # Validate — handle both async and sync validate() methods
         worker = self._router.route(task)
         if worker and hasattr(worker, "validate"):
             try:
-                valid = asyncio.run(worker.validate(result))
+                if asyncio.iscoroutinefunction(worker.validate):
+                    valid = asyncio.run(worker.validate(result))
+                else:
+                    valid = worker.validate(result)
             except Exception:
                 valid = True
             if not valid:

@@ -7,11 +7,20 @@ Uses generic labels; domain-specific context is the user's responsibility.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from .blackboard import Blackboard
 from .correlation import CorrelationEngine
 from .models import Finding
+
+try:
+    from jinja2 import Environment, FileSystemLoader
+    _JINJA_AVAILABLE = True
+except ImportError:
+    _JINJA_AVAILABLE = False
+
+_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 
 class Aggregator:
@@ -54,7 +63,29 @@ class Aggregator:
 
     def render_markdown(self, assessment: dict[str, Any],
                         title: str = "Assessment") -> str:
-        """Render an assessment dict as markdown with generic labels."""
+        """Render an assessment dict as markdown with generic labels.
+
+        Uses a Jinja2 template (templates/assessment.j2) when available for
+        consistent formatting. Falls back to the inline string builder if
+        jinja2 is not installed.
+        """
+        if _JINJA_AVAILABLE and (_TEMPLATES_DIR / "assessment.j2").exists():
+            env = Environment(
+                loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+                autoescape=False,
+                trim_blocks=True,
+                lstrip_blocks=True,
+                keep_trailing_newline=True,
+            )
+            template = env.get_template("assessment.j2")
+            return template.render(assessment=assessment, title=title)
+
+        # Fallback: inline string builder (no jinja2 dependency)
+        return self._render_markdown_inline(assessment, title)
+
+    def _render_markdown_inline(self, assessment: dict[str, Any],
+                                title: str = "Assessment") -> str:
+        """Inline markdown renderer — fallback when jinja2 is unavailable."""
         lines = [
             f"# {title}",
             f"",
