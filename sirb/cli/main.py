@@ -1656,6 +1656,7 @@ initMap();
                             "Mode": t.get("mode", "?"),
                             "Agents done": f"{done}/{total}" if done or total > 0 else "queued",
                             "Failed": failed,
+                            "run_id": rid,
                             "agents": agents_list}
                 except Exception:
                     return None
