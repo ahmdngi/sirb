@@ -1375,6 +1375,11 @@ body { font-family:"Inter",-apple-system,sans-serif; background:var(--bg); color
 .stat-icon { font-size:0.85rem; line-height:1; opacity:0.7; }
 .stat-value { font-size:1.05rem; font-weight:bold; color:var(--green); }
 .stat-label { font-size:0.62rem; color:var(--text-3); text-transform:uppercase; letter-spacing:0.04em; }
+.agent-grid { display:flex; gap:0.5rem; flex-wrap:wrap; margin:0.5em 0; }
+.agent-card { background:var(--bg-3); border:1px solid var(--border); border-radius:6px; padding:0.4rem 0.7rem; min-width:180px; flex:1; }
+.agent-card .ac-header { display:flex; align-items:center; gap:0.4rem; font-size:0.78em; font-weight:600; margin-bottom:0.2rem; }
+.agent-card .ac-status { font-size:0.65em; opacity:0.7; }
+.agent-card .ac-activity { font-size:0.65em; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; }
 nav { position:sticky; top:0; z-index:100; background:color-mix(in srgb,var(--bg) 90%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:0.7em 1.5em; display:flex; align-items:center; gap:1em; }
 nav .brand { font-size:1.1em; font-weight:700; letter-spacing:-0.01em; display:flex; align-items:center; gap:0.5em; }
@@ -1457,6 +1462,7 @@ nav .nav-right { margin-left:auto; display:flex; align-items:center; gap:0.75em;
   <div class="content">
     <div class="panel">
       <div id="live-stats" class="stat-grid"></div>
+      <div id="agent-cards" class="agent-grid"></div>
       <div id="report-tabs" style="display:none;border-bottom:1px solid var(--border);margin-bottom:0.5em;">
         <button class="tab-btn active" data-tab="swarm" onclick="switchTab('swarm')">📋 Swarm</button>
         <span id="vessel-tabs"></span>
@@ -1508,7 +1514,7 @@ const sseEl=document.getElementById("sse-status"),evtSource=new EventSource("/ev
 evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status";};
 evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
 evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.data)liveStats(d.data)}catch(_){}};
-function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}}
+function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){if(k==="agents")continue;const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}const ac=document.getElementById("agent-cards");if(!ac)return;ac.innerHTML="";if(!d.agents||!d.agents.length)return;d.agents.forEach(a=>{const sc=a.status==="done"?"#3fb950":a.status==="running"?"#58a6ff":"#f85149";const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";ac.innerHTML+='<div class="agent-card"><div class="ac-header"><span>'+icon+" Agent "+a.target.slice(0,10)+'</span><span class="ac-status" style="color:'+sc+'">'+a.status+"</span></div><div class=\"ac-activity\">"+(a.activity||"Waiting\u2026")+"</div></div>"})}
 async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
@@ -1600,15 +1606,47 @@ initMap();
             if tr.exists():
                 try:
                     t = json.loads(tr.read_text())
-                    agents = t.get("agents", {})
-                    done = sum(1 for a in agents.values() if a.get("status") == "done")
-                    failed = sum(1 for a in agents.values() if a.get("status") in ("failed", "timeout", "error"))
-                    total = len(t.get("targets", []))
+                    agents_dict = t.get("agents", {})
+                    targets = t.get("targets", [])
+                    done = sum(1 for a in agents_dict.values() if a.get("status") == "done")
+                    failed = sum(1 for a in agents_dict.values() if a.get("status") in ("failed", "timeout", "error"))
+                    total = len(targets)
+
+                    # Build per-agent status with last log line
+                    agents_list = []
+                    vessels_dir = d / rid / "vessels"
+                    for ti in targets:
+                        a = agents_dict.get(ti, {})
+                        status = a.get("status", "running")
+                        activity = ""
+                        if status == "running":
+                            # Read last meaningful line from live log
+                            log_path = vessels_dir / f"{ti}.log"
+                            if log_path.exists():
+                                lines = log_path.read_text(errors="replace").strip().split("\n")
+                                # Find last non-empty, non-separator line
+                                for ln in reversed(lines):
+                                    ln = ln.strip()
+                                    if ln and not ln.startswith("─") and ln != "":
+                                        activity = ln[:120]
+                                        break
+                        elif status == "done":
+                            activity = "✅ Complete"
+                        elif status in ("failed", "timeout", "error"):
+                            activity = "❌ Failed"
+
+                        agents_list.append({
+                            "target": ti,
+                            "status": status,
+                            "activity": activity,
+                        })
+
                     return {"Targets": total,
                             "Status": t.get("status", "unknown"),
                             "Mode": t.get("mode", "?"),
                             "Agents done": f"{done}/{total}" if done or total > 0 else "queued",
-                            "Failed": failed}
+                            "Failed": failed,
+                            "agents": agents_list}
                 except Exception:
                     return None
 
