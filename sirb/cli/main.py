@@ -784,19 +784,24 @@ def _dashboard(args):
             else:
                 stats["duration"] = f"{int(total_s)}s"
 
-        # Phases — count numbered report sections in the vessel markdown files
+        # Model — read from hermes CLI args in the log header
+        model_m = re.search(r'--model\s+([\w.-]+)', text)
+        if model_m:
+            stats["model"] = model_m.group(1)
+
+        # Phases — count numbered report sections in actual vessel files only (not log)
         sub = vessels_dir / target
         report_text = ""
         for f in sorted(sub.glob("*.md")):
             try:
                 t = f.read_text(errors="replace")
-                if len(t) > 200:  # only substantial reports
-                    report_text += t + "\n"
+                if len(t) > 200:
+                    report_text += "\n".join(t.split("\n")[:3]) + "\n"  # only section headers
             except Exception:
                 pass
         if report_text:
             sections = re.findall(r'^## \d', report_text, re.MULTILINE)
-            stats["phases"] = len(sections) if sections else 0
+            stats["phases"] = max(len(sections), 1)
             model_m = re.search(r'(?i)(?:Model|Provider).*?[:：]\s*([\w.-]+)', report_text)
             if model_m:
                 stats["model"] = model_m.group(1)
