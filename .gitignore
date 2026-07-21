@@ -9,3 +9,5 @@ dist/
 build/
 
 AGENTS.md
+.tmp-report-build/
+tmp/

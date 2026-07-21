@@ -4,7 +4,7 @@
   <img src="sirb/cli/logo.png" alt="Sirb Logo" width="300">
 </p>
 
-**v0.4.1** — Lightweight, zero-framework-dependency task orchestration engine.
+**v0.5.0** — Lightweight, zero-framework-dependency task orchestration engine.
 
 Manages N worker agents executing tasks concurrently from a thread-safe queue,
 routes them by type to registered workers, persists findings on a shared
@@ -318,9 +318,12 @@ Three-column layout matching shipcrawler:
 - **GitHub link** in nav
 - **Clickable logo** — `goHome()` returns to clean landing page
 - **Terminal welcome message** on landing page (`$ sirb --status`)
-- **Executive summary** with warning badges (🔴 SHADOW FLEET, 🟡 SANCTIONED, etc.) when viewing runs
+- **Vessel list** with warning tags (🔴 SHADOW, 🟡 SANCTIONED, 🟠 AIS DARK) shown above swarm report
+- **Terminal tab** (📡) — replays full SSE agent log history with colored per-vessel labels
 - **SSE filters** by selected run — no stale data on page refresh
 - **Rotating globe** (Three.js particle globe) at bottom of right panel
+- **Swarm report** — vessel names extracted from `**Target:** NAME (IMO` in analyst reports, warning tags column
+- **Profile/model providers** — `profiles-models.json` has correct `provider` field for all models in all profiles
 
 ### Adding a New Worker
 
@@ -329,6 +332,52 @@ Three-column layout matching shipcrawler:
 3. Add `[project.entry-points.sirb_workers]` in `pyproject.toml`
 4. `pip install` it
 5. It automatically appears in the dashboard Worker dropdown — no sirb code changes needed
+
+## Changelog
+
+### v0.3.0 (2026-07-21)
+
+- **Core kernel wiring** — dashboard `_run_swarm` uses TaskQueue + WorkerPool + Blackboard instead of raw subprocesses
+- **Worker discovery** — `WorkerRegistry.discover_entry_points()` auto-discovers pip-installed workers
+- **Dynamic forms** — `input_schema()` + `parse_targets()` for worker-specific input forms with parse preview
+- **Dynamic stats bar** — `stats_schema()` + `extract_stats()` per worker, no hardcoded vessel stats in sirb
+- **Dynamic report tabs** — `report_tabs()` per worker (file type + per_target type)
+- **3-column layout** — sidebar | center (hero + terminal + stats) | right (launch panel + globe)
+- **Theme switcher** — Dark / Light / Classic with localStorage persistence
+- **GitHub link** in nav
+- **Clickable logo** — `goHome()` returns to clean landing page
+- **Terminal welcome message** — `$ sirb --status` on landing page
+- **Vessel list** — name + warning tags (🔴 SHADOW, 🟡 SANCTIONED, 🟠 AIS DARK) above swarm report
+- **Terminal tab** (📡) — replays full SSE agent log history with colored per-vessel labels
+- **Swarm report** — vessel names from `**Target:** NAME (IMO` in analyst reports, Tags column (removed per user request — tags shown above)
+- **SSE filters** by selected run — no stale data on page refresh
+- **Rotating globe** (Three.js particle globe) at bottom of right panel
+- **Profile/model providers** — `profiles-models.json` has correct `provider` field for all models
+- **`escapeHtml()`** — safe HTML rendering for terminal tab
+- **`/run/<rid>/terminal`** endpoint — returns agent log lines for SSE replay
+- **`validate()` fix** — async/sync check in `worker_pool.py`
+- **`.pyc` cache** — must clear + force-reinstall after editing `sirb/cli/main.py`
+
+### v0.2.0 (2026-07-17)
+
+- Dashboard v2 with SSE live stream, run history sidebar, launch panel
+- Geo targeting — lat/lon/radius bounding box discovery via GeoScanner
+- Batch mode — up to 3 MMSIs per pipeline call
+- CVE enrichment from Shodan vulnerabilities
+- AIS intelligence — destination tracking, anomaly detection
+- Equasis rate-limit retry — 30s wait + retry on "VESSEL NOT FOUND"
+- Deep mode — agent-driven Hermes flow
+- Kinetic Command ops dashboard (branch: `kinetic-command`)
+- Webhook POST on run completion
+- Multi-run TrendTracker — severity/finding-type deltas
+- Dashboard resilience — ThreadingHTTPServer + socket timeout + cron watchdog
+
+### v0.1.0 (2026-07-17)
+
+- Initial release — TaskQueue, WorkerPool, Blackboard, Router, Checkpointer
+- CLI: `sirb run`, `sirb list-workers`, `sirb init`, `sirb dashboard`
+- Entry-point worker discovery via `sirb_workers` group
+- 70 tests — pure kernel only
 
 ## License
 

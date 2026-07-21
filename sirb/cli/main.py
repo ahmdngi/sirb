@@ -701,10 +701,10 @@ def _dashboard(args):
         m = re.search(r'\bMMSI\s*:?\s*(\d{9})\b', text, re.IGNORECASE)
         if m: data["mmsi"] = m.group(1)
 
-        # Extract vessel name — match "| **Current Name** | Value |" or "**Target:** NAME (IMO"
+        # Extract vessel name — match "**Target:** NAME (IMO" or "| **Current Name** | Value |"
         m = re.search(r'\|\s*\*?\*?Current\s*Name\*?\*?\s*\|\s*([^|]+?)\s*\|', text)
         if not m:
-            m = re.search(r'\*?\*?Target\*?\*?\s*:\s*([A-Za-z0-9][A-Za-z0-9\s\-]+?)(?:\s*\(IMO|\s*\(MMSI|\s*\n)', text)
+            m = re.search(r'Target:\s*\*{0,2}\s*([A-Za-z][A-Za-z0-9\s\-]+?)\s*\(IMO', text)
         if not m:
             m = re.search(r'(?i)(?:vessel\s*[:\-]\s*|name\s*[:\-]\s*|ship\s*[:\-]\s*["\']?)([A-Za-z0-9\s\-]+?)(?:\s*[,.]|\s*MMSI|\s*IMO|\s*Flag|\s*$)', text)
         if m: data["name"] = m.group(1).strip()[:50]
@@ -744,6 +744,32 @@ def _dashboard(args):
         # Extract AIS proximity / connections
         conn_matches = re.findall(r'(?i)(?:connection|related|linked|associated\s*with|same\s*owner|sister\s*ship)[^.]*\.', text)
         data["connections"] = " ".join(conn_matches[:5])
+
+        # Extract warning tags
+        tags = []
+        if re.search(r'shadow\s*fleet|dark\s*fleet', text, re.IGNORECASE):
+            tags.append("🔴 SHADOW")
+        if re.search(r'sanctioned|sanctions', text, re.IGNORECASE):
+            tags.append("🟡 SANCTIONED")
+        if re.search(r'AIS\s*shutdown|AIS\s*dark|AIS\s*off', text, re.IGNORECASE):
+            tags.append("🟠 AIS DARK")
+        if re.search(r'kinetic|drone|attack|strike', text, re.IGNORECASE):
+            tags.append("💥 KINETIC")
+        if re.search(r'casualty|repairing', text, re.IGNORECASE):
+            tags.append("⚠️ CASUALTY")
+        data["tags"] = " ".join(tags)
+
+        # Extract vessel name from H1 if not already found
+        if data["name"] == target:
+            m = re.search(r'^#\s*(.+?)(?:\n|$)', text, re.MULTILINE)
+            if m:
+                h1 = m.group(1).strip()
+                # Handle "9207027 (VERNAL) — Vessel OSINT Analyst Report"
+                m2 = re.search(r'\(([A-Z][A-Za-z]+)\)', h1)
+                if m2:
+                    data["name"] = m2.group(1)
+                else:
+                    data["name"] = h1[:50]
 
         return data
 
@@ -864,17 +890,18 @@ def _dashboard(args):
         lines.append(f"**Targets ({len(targets)}):** {', '.join(targets)}\n")
         lines.append(f"**Generated:** {generated_at}\n\n")
         lines.append("## Agent Results\n\n")
-        lines.append("| Target | Status | IMO | Flag | Owner |\n")
+        lines.append("| Vessel | Status | IMO | Flag | Owner |\n")
         lines.append("|--------|--------|-----|------|-------|\n")
         for t in targets:
             a = agents.get(t, {})
             s = a.get("status", "?")
             icon = "✅" if s in ("done", "success") else "❌"
             d = vessel_data.get(t, {})
+            name = d.get("name") or t
             imo = d.get("imo") or "—"
             flag = d.get("flag") or "—"
             owner = (d.get("owner") or "")[:30] or "—"
-            lines.append(f"| {t} | {icon} | {imo} | {flag} | {owner} |\n")
+            lines.append(f"| {name} | {icon} | {imo} | {flag} | {owner} |\n")
         lines.append(f"\n## Cross-Vessel Analysis\n\n{connections}\n")
         return "".join(lines)
 
@@ -997,6 +1024,30 @@ def _dashboard(args):
                     self._send_json(targets)
                 else:
                     self._send_json([])
+
+            elif re.match(r"^/run/[^/]+/terminal$", path):
+                rid = path.split("/")[2]
+                vessels_dir = runs_base / rid / "vessels"
+                events = []
+                if vessels_dir.exists():
+                    for d in sorted(vessels_dir.iterdir()):
+                        if not d.is_dir():
+                            continue
+                        target = d.name
+                        log_path = d / "agent.log"
+                        if not log_path.exists():
+                            log_path = vessels_dir / f"{target}.log"
+                        if not log_path.exists():
+                            continue
+                        try:
+                            for line in log_path.read_text(errors="replace").strip().split("\n"):
+                                line = line.strip()
+                                if line:
+                                    events.append({"target": target, "line": line})
+                        except Exception:
+                            pass
+                self._send_json(events)
+
             elif re.match(r"^/run/[^/]+/vessels$", path):
                 rid = path.split("/")[2]
                 vdir = runs_base / rid / "vessels"
@@ -1663,17 +1714,19 @@ async function loadRuns(){const r=await fetch("/runs");const runs=await r.json()
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 
-async function selectRun(rid){currentRunId=rid;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const workerName=tr.worker||"shipcrawler";const reportTabs=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/report-tabs").then(x=>x.json()).catch(()=>[{id:"swarm",label:"Swarm",icon:"📋",type:"file",path:"swarm-report.md"}]);await renderReportTabs(reportTabs,rid,workerName);document.getElementById("report-tabs").style.display="";switchTab("swarm");renderTab("swarm");const statsSchema=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/stats-schema").then(x=>x.json()).catch(()=>[{key:"tool_calls",icon:"⚙️",label:"Tool Calls"},{key:"duration",icon:"⏱",label:"Duration"},{key:"model",icon:"🧠",label:"Model"}]);const ss=document.getElementById("final-summary");ss.innerHTML=statsSchema.map(s=>'<div class="summary-stat"><span class="stat-icon">'+s.icon+'</span><span class="stat-value" id="s-'+s.key+'">—</span><span class="stat-label">'+s.label+'</span></div>').join("");fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{statsSchema.forEach(s=>{const el=document.getElementById("s-"+s.key);if(el)el.textContent=d[s.key]||"—"})}).catch(()=>{});document.getElementById("final-summary").style.display="flex";showExecutiveSummary(rid)}
-async function showExecutiveSummary(rid){try{const r=await fetch("/run/"+rid+"/targets");const targets=await r.json();if(!targets.length)return;let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.82rem;line-height:1.6;"><div style="color:var(--accent);font-weight:600;margin-bottom:0.5rem;">$ sirb --summary '+rid+'</div>';for(const t of targets){const fr=await fetch("/run/"+rid+"/vessel/"+t.target+"/analyst-report.md");const text=await fr.text();const m=text.match(/##\s*EXECUTIVE\s*SUMMARY\s*\n([\s\S]*?)(?:\n##|\n---|\n\*\*Overall)/i);if(m){let summary=m[1].trim().split("\n\n")[0].trim();summary=summary.replace(/\*\*/g,"").replace(/\[.*?\]/g,"").substring(0,500);const warnings=[];if(/shadow\s*fleet|dark\s*fleet/i.test(text))warnings.push("🔴 SHADOW FLEET");if(/sanctioned|sanctions/i.test(text))warnings.push("🟡 SANCTIONED");if(/AIS\s*shutdown|AIS\s*dark|AIS\s*off/i.test(text))warnings.push("🟠 AIS DARK");if(/kinetic|drone|attack|strike/i.test(text))warnings.push("💥 KINETIC THREAT");if(/casualty|repairing/i.test(text))warnings.push("⚠️ IN CASUALTY");html+='<div style="margin-bottom:0.75rem;padding:0.5rem;border-left:3px solid '+(warnings.length?"var(--red)":"var(--green)")+';background:var(--bg-2);border-radius:0 6px 6px 0;"><div style="font-weight:600;color:var(--accent);">'+t.target+'</div>';if(warnings.length)html+='<div style="margin:0.3rem 0;">'+warnings.join("  ")+"</div>";html+='<div style="color:var(--text-2);margin-top:0.2rem;">'+summary+"...</div></div>"}}html+="</div>";document.getElementById("assessment-view").innerHTML=html}catch(_){}}
-async function renderReportTabs(tabs,rid,workerName){let html="";for(const t of tabs){if(t.type==="file"){html+='<button class="tab-btn" data-tab="'+t.id+'" onclick="switchTab(\''+t.id+'\')">'+t.icon+" "+t.label+"</button>"}else if(t.type==="per_target"){const ep=t.endpoint.replace("{rid}",rid);try{const targets=await fetch(ep).then(x=>x.json());for(const tgt of targets){html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+tgt.target+'\',\''+tgt.files[0]+'\')">'+t.icon+" "+tgt.target.slice(0,12)+"</button>"}}catch(_){}}}document.getElementById("report-tabs").innerHTML=html}
+async function selectRun(rid){currentRunId=rid;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const workerName=tr.worker||"shipcrawler";const reportTabs=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/report-tabs").then(x=>x.json()).catch(()=>[{id:"swarm",label:"Swarm",icon:"📋",type:"file",path:"swarm-report.md"}]);await renderReportTabs(reportTabs,rid,workerName);document.getElementById("report-tabs").style.display="";switchTab("swarm");renderTab("swarm");const statsSchema=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/stats-schema").then(x=>x.json()).catch(()=>[{key:"tool_calls",icon:"⚙️",label:"Tool Calls"},{key:"duration",icon:"⏱",label:"Duration"},{key:"model",icon:"🧠",label:"Model"}]);const ss=document.getElementById("final-summary");ss.innerHTML=statsSchema.map(s=>'<div class="summary-stat"><span class="stat-icon">'+s.icon+'</span><span class="stat-value" id="s-'+s.key+'">—</span><span class="stat-label">'+s.label+'</span></div>').join("");fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{statsSchema.forEach(s=>{const el=document.getElementById("s-"+s.key);if(el)el.textContent=d[s.key]||"—"})}).catch(()=>{});document.getElementById("final-summary").style.display="flex";showVesselList(rid)}
+async function showVesselList(rid){try{const r=await fetch("/run/"+rid+"/targets");const targets=await r.json();if(!targets.length)return;const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const agents=tr.agents||{};let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.82rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--border);">';for(const t of targets){const a=agents[t.target]||{};const st=a.status=="success"?"done":(a.status||"?");const sc=st=="done"?"var(--green)":st=="running"?"var(--accent)":"var(--red)";let name=t.target;let tags=[];try{const fr=await fetch("/run/"+rid+"/vessel/"+t.target+"/analyst-report.md");const text2=await fr.text();const nm=text2.match(/^#\s*(.+?)(?:\n|$)/m);if(nm)name=nm[1].trim();if(/shadow\s*fleet|dark\s*fleet/i.test(text2))tags.push("🔴 SHADOW");if(/sanctioned|sanctions/i.test(text2))tags.push("🟡 SANCTIONED");if(/AIS\s*shutdown|AIS\s*dark|AIS\s*off/i.test(text2))tags.push("🟠 AIS DARK")}catch(_){}html+='<div style="display:flex;align-items:center;gap:0.5rem;padding:0.2rem 0;"><span style="color:'+sc+';font-weight:600;">'+escapeHtml(name)+'</span>';if(tags.length)html+='<span style="font-size:0.68rem;">'+tags.join(" ")+"</span>";html+='<span style="color:var(--text-3);font-size:0.68rem;margin-left:auto;">'+st+'</span></div>'}html+="</div>";reportCache._vesselList=html;renderTab("swarm")}catch(_){}}
+async function renderReportTabs(tabs,rid,workerName){let html="";for(const t of tabs){if(t.type=="file"){html+='<button class="tab-btn" data-tab="'+t.id+'" onclick="switchTab(\''+t.id+'\')">'+t.icon+" "+t.label+"</button>"}else if(t.type=="per_target"){const ep=t.endpoint.replace("{rid}",rid);try{const targets=await fetch(ep).then(x=>x.json());for(const tgt of targets){html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+tgt.target+'\',\''+tgt.files[0]+'\')">'+t.icon+" "+tgt.target.slice(0,12)+"</button>"}}catch(_){}}}html+='<button class="tab-btn" data-tab="terminal" onclick="switchTab(\'terminal\')">📡 Terminal</button>';document.getElementById("report-tabs").innerHTML=html}
 
 
 
 async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML='<div class="md-content">'+marked.parse(text)+'</div>'}
 
-function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab=="swarm"){var sb=document.querySelector('[data-tab="swarm"]');if(sb)sb.classList.add("active");renderTab("swarm")}else{document.querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
+function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab=="swarm"){var sb=document.querySelector('[data-tab="swarm"]');if(sb)sb.classList.add("active");renderTab("swarm")}else if(tab=="terminal"){var tb=document.querySelector('[data-tab="terminal"]');if(tb)tb.classList.add("active");renderTerminalTab(currentRunId)}else{document.querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
 
-function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab=="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}else if(tab=="connections"){document.getElementById("report-title").textContent="connections.md"}if(content){view.innerHTML='<div class="md-content">'+marked.parse(content)+'</div>'}else if(tab=="swarm"){view.innerHTML='<span style="color:var(--text-3)">Loading swarm report...</span>'}else if(tab=="connections"){view.innerHTML='<span style="color:var(--text-3)">⏳ Connections analysis not ready yet.</span>'}}
+function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab=="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}if(content){let prefix="";if(tab=="swarm"&&reportCache._vesselList){prefix=reportCache._vesselList}view.innerHTML=prefix+'<div class="md-content">'+marked.parse(content)+'</div>'}else if(tab=="swarm"){view.innerHTML=reportCache._vesselList||'<span style="color:var(--text-3)">Loading swarm report...</span>'}}
+
+function escapeHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}async function renderTerminalTab(rid){const view=document.getElementById("assessment-view");document.getElementById("report-title").textContent="terminal.log";view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;">Loading terminal...</div>';try{const r=await fetch("/run/"+rid+"/terminal");const events=await r.json();if(!events.length){view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;padding:1rem;">No agent logs found for this run.</div>';return}let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.75rem;line-height:1.5;padding:0.3rem;">';html+='<div style="color:var(--accent);font-weight:600;margin-bottom:0.5rem;">$ sirb --replay '+rid+'</div>';const colors=["#58a6ff","#3fb950","#f85149","#bf8700","#a371f7"];let lastTarget="";let ci=0;const targetColors={};events.forEach(ev=>{if(!(ev.target in targetColors)){targetColors[ev.target]=colors[ci%colors.length];ci++}const c=targetColors[ev.target];const line=ev.line;if(line.startsWith(("─","╭","├","└","│","╰")))return;if(line.length<2)return;html+='<div style="display:flex;gap:0.4rem;padding:0.05rem 0;"><span style="color:'+c+';font-weight:600;flex-shrink:0;font-size:0.68rem;">['+ev.target.slice(0,8)+']</span><span style="color:var(--text-2);overflow:hidden;text-overflow:ellipsis;">'+escapeHtml(line.slice(0,200))+'</span></div>'});html+="</div>";view.innerHTML=html}catch(e){view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;padding:1rem;">Error loading terminal: '+e.message+'</div>'}}
 
 
 

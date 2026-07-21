@@ -1,6 +1,6 @@
 {# Sirb Swarm Report — renders the combined multi-agent vessel report.
    Vars: rid, mode, targets (list), agents (dict), connections (str),
-   vessels_dir (Path), framework_version. #}
+   vessel_data (dict), generated_at, framework_version. #}
 # Sirb Swarm Report: {{ rid }}
 
 **Mode:** {{ mode }}
@@ -9,14 +9,15 @@
 
 ## Agent Results
 
-| Target | Status | IMO | Flag | Owner |
+| Vessel | Status | IMO | Flag | Owner |
 |--------|--------|-----|------|-------|
 {% for t in targets -%}
 {% set a = agents.get(t, {}) -%}
 {% set s = a.status|default("?") -%}
-{% set icon = "✅" if s == "done" else "❌" -%}
+{% set icon = "✅" if s in ("done", "success") else "❌" -%}
 {% set d = vessel_data.get(t, {}) -%}
-| {{ t }} | {{ icon }} | {{ d.imo|default("—") }} | {{ d.flag|default("—") }} | {{ d.owner[:30] if d.owner else "—" }} |
+{% set name = d.name|default(t) -%}
+| {{ name }} | {{ icon }} | {{ d.imo|default("—") }} | {{ d.flag|default("—") }} | {{ d.owner[:30] if d.owner else "—" }} |
 {% endfor %}
 
 ## Cross-Vessel Analysis
