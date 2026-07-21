@@ -738,7 +738,7 @@ def _dashboard(args):
         return data
 
     def _extract_agent_stats(target: str, vessels_dir: Path) -> dict:
-        """Extract ShipCrawler-style stats from agent log."""
+        """Extract stats from hermes agent log."""
         stats = {"phases": 0, "duration": "—", "reports": 0,
                  "tool_calls": 0, "searches": 0, "sources": 0, "shodan": 0,
                  "model": "—"}
@@ -747,7 +747,6 @@ def _dashboard(args):
         if log_path.exists():
             text = log_path.read_text(errors="replace")
         else:
-            # Fallback: read all .md reports from vessel subdirectory
             sub = vessels_dir / target
             texts = []
             for f in sorted(sub.glob("*.md")):
@@ -760,41 +759,55 @@ def _dashboard(args):
         if not text:
             return stats
 
-        # Try agent-log patterns first (tool calls, searches, etc.)
-        # Then fall back to report-content patterns
-        phases = re.findall(r'(?i)(?:##\s*Phase|Phase\s*\d|Executing phase|Investigating)', text)
-        stats["phases"] = len(phases)
-        # Fallback: count top-level markdown sections as phases
-        if stats["phases"] == 0:
-            sections = re.findall(r'^## \d', text, re.MULTILINE)
-            stats["phases"] = len(sections)
+        # Count actual tool executions (hermes format: ┊ 💻 $ command)
+        tool_execs = re.findall(r'┊ 💻 \$', text)
+        stats["tool_calls"] = len(tool_execs)
 
-        dur = re.search(r'(?i)(?:Duration|took|completed in)\s*[:\-]?\s*([\d\.]+\s*[smhd])', text)
-        if dur: stats["duration"] = dur.group(1).strip()
-        dur2 = re.search(r'(\d+\.?\d*)\s*s(?:ec(?:ond)?s?)?\s*(?:total|elapsed)?', text)
-        if dur2 and stats["duration"] == "—": stats["duration"] = dur2.group(1) + "s"
+        # Count web searches (hermes terminal commands that look like searches)
+        searches = re.findall(r'┊ 💻 \$\s+(?:web_search|web_extract|curl |wget |grep |whois |dig |nslookup)', text)
+        stats["searches"] = len(searches)
 
-        reports = re.findall(r'(?i)(?:Report\s*(?:saved|written|generated|created)|\.md\b)', text)
-        stats["reports"] = len(reports)
+        # Count sources (Fetching, sourced from, visited)
+        sources = re.findall(r'(?i)(?:Fetching|🌐|sourced from|visited)', text)
+        stats["sources"] = len(sources)
 
-        tc_n = re.search(r'(?i)tool_calls?[:\s]+(\d+)', text)
-        if tc_n: stats["tool_calls"] = int(tc_n.group(1))
-        else: stats["tool_calls"] = len(re.findall(r'(?i)(?:Tool call|⚙️)', text))
+        # Shodan — count Shodan-related lines
+        shodan = re.findall(r'(?i)\bShodan\b', text)
+        stats["shodan"] = len(shodan)
 
-        ss_n = re.search(r'(?i)searches?[:\s]+(\d+)', text)
-        if ss_n: stats["searches"] = int(ss_n.group(1))
-        else: stats["searches"] = len(re.findall(r'(?i)(?:Searching|🔍)', text))
+        # Duration — parse session summary line
+        dur = re.search(r'Duration:\s*([\d.]+)s', text)
+        if dur:
+            total_s = float(dur.group(1))
+            if total_s >= 60:
+                stats["duration"] = f"{int(total_s/60)}m {int(total_s%60)}s"
+            else:
+                stats["duration"] = f"{int(total_s)}s"
 
-        src_n = re.search(r'(?i)sources?[:\s]+(\d+)', text)
-        if src_n: stats["sources"] = int(src_n.group(1))
-        else: stats["sources"] = len(re.findall(r'(?i)(?:Fetching|🌐)', text))
+        # Phases — count numbered report sections in the vessel markdown files
+        sub = vessels_dir / target
+        report_text = ""
+        for f in sorted(sub.glob("*.md")):
+            try:
+                t = f.read_text(errors="replace")
+                if len(t) > 200:  # only substantial reports
+                    report_text += t + "\n"
+            except Exception:
+                pass
+        if report_text:
+            sections = re.findall(r'^## \d', report_text, re.MULTILINE)
+            stats["phases"] = len(sections) if sections else 0
+            model_m = re.search(r'(?i)(?:Model|Provider).*?[:：]\s*([\w.-]+)', report_text)
+            if model_m:
+                stats["model"] = model_m.group(1)
 
-        sh_n = re.search(r'(?i)shodan_hits?[:\s]+(\d+)', text)
-        if sh_n: stats["shodan"] = int(sh_n.group(1))
-        else: stats["shodan"] = len(re.findall(r'(?i)(?:Shodan|🛰️)', text))
+        # Reports — count actual .md files saved in the vessel directory
+        if sub.exists():
+            stats["reports"] = len([f for f in sub.glob("*.md") if f.stat().st_size > 100])
 
-        md = re.search(r'(?i)(?:Model|model)[:\s]+([\w\.\-/]+)', text)
-        if md: stats["model"] = md.group(1).strip()
+        # If no tool executions found, fall back to text patterns
+        if stats["tool_calls"] == 0:
+            stats["tool_calls"] = len(re.findall(r'(?i)(?:Tool call|⚙️)', text))
 
         return stats
 
