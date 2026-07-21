@@ -1519,7 +1519,7 @@ const sseEl=document.getElementById("sse-status"),evtSource=new EventSource("/ev
 evtSource.onopen=()=>{sseEl.textContent="connected";sseEl.className="sse-status";};
 evtSource.onerror=()=>{sseEl.textContent="disconnected";sseEl.className="sse-status disconnected";};
 evtSource.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.type==="stats"&&d.data)liveStats(d.data)}catch(_){}};
-function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){if(k==="agents")continue;const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}const ac=document.getElementById("agent-cards");if(!ac)return;ac.innerHTML="";if(!d.agents||!d.agents.length)return;d.agents.forEach(a=>{const sc=a.status==="done"?"#3fb950":a.status==="running"?"#58a6ff":"#f85149";const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";ac.innerHTML+='<div class="agent-card"><div class="ac-header"><span>'+icon+" Agent "+a.target.slice(0,10)+'</span><span class="ac-status" style="color:'+sc+'">'+a.status+"</span></div><div class=\"ac-activity\">"+(a.activity||"Waiting\u2026")+"</div></div>"});const av=document.getElementById("assessment-view");if(!av)return;if(d.Status==="running"){let h='<div style="padding:0.5rem 0">';d.agents.forEach((a,i)=>{const c=AGENT_COLORS[i%AGENT_COLORS.length];const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";h+='<div style="margin-bottom:0.6rem;font-family:JetBrains Mono,monospace;font-size:0.8rem;border-left:3px solid '+c+';padding-left:0.6rem;"><div style="display:flex;align-items:center;gap:0.4rem;"><span style="font-weight:600;color:'+c+'">'+icon+" Agent "+a.target.slice(0,12)+'</span><span style="font-size:0.7rem;opacity:0.6;color:'+(a.status==="running"?c:"inherit")+'">'+a.status+"</span></div><div style=\"color:var(--text-2);font-size:0.7rem;margin-top:0.15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\">"+(a.activity||"Waiting\u2026")+"</div></div>"});h+="</div>";av.innerHTML=h}}
+function liveStats(d){const g=document.getElementById("live-stats");if(!g)return;g.innerHTML="";for(const[k,v]of Object.entries(d)){if(k==="agents")continue;const c=k==="Failed"||k==="Error"?"var(--red)":k==="Running"?"var(--accent)":"var(--green)";g.innerHTML+='<div class="stat-card"><div class="label">'+k+'</div><div class="value" style="color:'+c+'">'+v+'</div></div>'}const ac=document.getElementById("agent-cards");if(!ac)return;ac.innerHTML="";if(!d.agents||!d.agents.length)return;d.agents.forEach(a=>{const sc=a.status==="done"?"#3fb950":a.status==="running"?"#58a6ff":"#f85149";const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";ac.innerHTML+='<div class="agent-card"><div class="ac-header"><span>'+icon+" Agent "+a.target.slice(0,10)+'</span><span class="ac-status" style="color:'+sc+'">'+a.status+"</span></div><div class=\"ac-activity\">"+(a.activity||"Waiting\u2026")+"</div></div>"});const av=document.getElementById("assessment-view");if(!av)return;if(d.Status==="running"){let h='<div style="padding:0.3rem 0;font-family:JetBrains Mono,monospace;font-size:0.75rem;line-height:1.5;">';d.agents.forEach((a,i)=>{const c=AGENT_COLORS[i%AGENT_COLORS.length];const icon=a.status==="done"?"✅":a.status==="running"?"⏳":"❌";const lines=(a.activity||"Waiting...").split("\n");lines.forEach(l=>{const t=l.trim();if(!t)return;h+='<div style="display:flex;gap:0.5rem;"><span style="color:'+c+';font-weight:600;flex-shrink:0;">['+a.target.slice(0,10)+']</span><span style="color:var(--text-2);overflow:hidden;text-overflow:ellipsis;">'+t+'</span></div>'})});h+="</div>";av.innerHTML=h}}
 async function loadRuns(){const r=await fetch("/runs");const runs=await r.json();const el=document.getElementById("run-list");el.innerHTML=runs.map(r=>{const dt=r.generated_at||new Date(r.mtime*1000).toLocaleString();const a=r.id===currentRunId?"active":"";return'<div class="run-item '+a+'" onclick="selectRun(\''+r.id+'\')" id="ri-'+r.id+'"><div style="font-weight:'+(r.has_assessment?"600":"400")+';font-size:0.82em">'+r.id.slice(0,16)+'</div><div class="date">'+dt+(r.targets?" · "+r.targets+" targets":"")+'</div><button class="sidebar-delete" onclick="event.stopPropagation();deleteRun(\''+r.id+'\')" title="Delete run">🗑</button></div>'}).join("");if(!runs.length)el.innerHTML='<div class="run-empty">No runs yet</div>'}
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
@@ -1625,16 +1625,19 @@ initMap();
                         status = a.get("status", "running")
                         activity = ""
                         if status == "running":
-                            # Read last meaningful line from live log
+                            # Read last meaningful lines from live log
                             log_path = vessels_dir / f"{ti}.log"
                             if log_path.exists():
                                 lines = log_path.read_text(errors="replace").strip().split("\n")
-                                # Find last non-empty, non-separator line
+                                # Take last 3 non-empty, non-separator lines
+                                meaningful = []
                                 for ln in reversed(lines):
                                     ln = ln.strip()
-                                    if ln and not ln.startswith("─") and ln != "":
-                                        activity = ln[:120]
-                                        break
+                                    if ln and not ln.startswith("─") and ln and len(ln) > 2:
+                                        meaningful.append(ln[:130])
+                                        if len(meaningful) >= 3:
+                                            break
+                                activity = "\n".join(reversed(meaningful))
                         elif status == "done":
                             activity = "✅ Complete"
                         elif status in ("failed", "timeout", "error"):
