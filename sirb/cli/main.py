@@ -789,22 +789,18 @@ def _dashboard(args):
         if model_m:
             stats["model"] = model_m.group(1)
 
-        # Phases — count numbered report sections in actual vessel files only (not log)
+        # Phases — count numbered report sections in vessel files
         sub = vessels_dir / target
-        report_text = ""
+        sections = set()
         for f in sorted(sub.glob("*.md")):
             try:
                 t = f.read_text(errors="replace")
-                if len(t) > 200:
-                    report_text += "\n".join(t.split("\n")[:3]) + "\n"  # only section headers
+                for m in re.finditer(r'^## (\d+)\.\s+\w', t, re.MULTILINE):
+                    sections.add(int(m.group(1)))
             except Exception:
                 pass
-        if report_text:
-            sections = re.findall(r'^## \d', report_text, re.MULTILINE)
-            stats["phases"] = max(len(sections), 1)
-            model_m = re.search(r'(?i)(?:Model|Provider).*?[:：]\s*([\w.-]+)', report_text)
-            if model_m:
-                stats["model"] = model_m.group(1)
+        if sections:
+            stats["phases"] = max(sections)
 
         # Reports — count actual .md files saved in the vessel directory
         if sub.exists():
