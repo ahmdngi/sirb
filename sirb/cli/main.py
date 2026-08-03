@@ -1151,6 +1151,7 @@ def _dashboard(args):
                 mode = params.get("mode", ["fast"])[0].strip()
                 profile = params.get("profile", [""])[0].strip()
                 model = params.get("model", [""])[0].strip()
+                batch = int(params.get("batch", ["10"])[0].strip() or "10")
                 if not mmsis:
                     self._send_json({"error": "No IMO/MMSI provided"}, 400)
                     return
@@ -1163,12 +1164,13 @@ def _dashboard(args):
                 worker_name = params.get("worker", ["shipcrawler"])[0].strip() or "shipcrawler"
                 tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode, "model": model or "deepseek-v4-flash",
                              "worker": worker_name,
+                             "batch": batch,
                              "created_at": datetime.now(timezone.utc).isoformat(),
                              "status": "running", "agents": {}}
                 (rundir / "tracking.json").write_text(json.dumps(tracking))
 
                 # Spawn hermes agents in background thread
-                def _run_swarm(rid, targets, md, prof, mod, worker_name="shipcrawler"):
+                def _run_swarm(rid, targets, md, prof, mod, worker_name="shipcrawler", batch=10):
                     """Run tasks via core kernel (TaskQueue + WorkerPool + Blackboard).
 
                     Agnostic: discovers workers via pip entry points — sirb
@@ -1264,7 +1266,7 @@ def _dashboard(args):
                     # Run pool
                     pool = WorkerPool(
                         queue=queue, router=router,
-                        max_workers=min(len(targets), 10),
+                        max_workers=min(len(targets), batch),
                         on_complete=on_complete,
                     )
                     pool.run()
@@ -1292,9 +1294,9 @@ def _dashboard(args):
                     report = _generate_swarm_report(rid, targets, md, agents, connections)
                     (runs_base / rid / "swarm-report.md").write_text(report)
 
-                def _run_swarm_safe(rid, targets, md, prof, mod, worker_name="shipcrawler"):
+                def _run_swarm_safe(rid, targets, md, prof, mod, worker_name="shipcrawler", batch=10):
                     try:
-                        _run_swarm(rid, targets, md, prof, mod, worker_name)
+                        _run_swarm(rid, targets, md, prof, mod, worker_name, batch)
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()
@@ -1305,7 +1307,7 @@ def _dashboard(args):
 
                 thread = threading.Thread(
                     target=_run_swarm_safe,
-                    args=(run_id, mmsi_list, mode, profile, model, worker_name),
+                    args=(run_id, mmsi_list, mode, profile, model, worker_name, batch),
                     daemon=True,
                 )
                 thread.start()
@@ -1694,6 +1696,7 @@ nav .nav-link:hover { color:var(--accent); }
       <!-- Parse preview -->
       <div id="parse-preview" style="display:none;"></div>
       <div class="form-group"><label>Model</label><select id="model-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="">Loading models...</option></select></div>
+      <div class="form-group"><label>Parallelism</label><select id="batch-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="50">50</option></select></div>
       <div class="btn-row"><button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button><button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button></div>
       <hr style="border-color:var(--border);margin:1em 0;" />
       <div id="globe-container" style="position:sticky;bottom:0;width:100%;height:200px;border-radius:8px;overflow:hidden;margin-top:auto;"></div>
@@ -1737,7 +1740,7 @@ function renderWorkerForm(schema){if(!schema||!schema.fields){document.getElemen
 function onProfileFormChange(){const el=document.getElementById("wf-profile");if(el)loadProfileModels(el.value)}
 async function parseInput(fieldName){const w=document.getElementById("worker-select").value;const input=document.getElementById("wf-"+fieldName).value;if(!input.trim()){alert("Enter some text first");return}try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/parse",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"input="+encodeURIComponent(input)});const data=await r.json();_parsedTargets=data.targets||[];showParsePreview(_parsedTargets)}catch(e){alert("Parse failed: "+e)}}
 function showParsePreview(targets){const el=document.getElementById("parse-preview");if(!targets.length){el.style.display="block";el.innerHTML='<div style="color:var(--red);font-size:0.78rem;padding:0.5rem;">No targets detected.</div>';return}let html='<div style="background:var(--bg-3);border:1px solid var(--border);border-radius:6px;padding:0.5rem;margin-top:0.5rem;"><div style="font-size:0.75rem;color:var(--accent);font-weight:600;margin-bottom:0.3rem;">Found '+targets.length+' target'+(targets.length>1?"s":"")+':</div>';html+='<table style="width:100%;font-size:0.75rem;font-family:JetBrains Mono,monospace;"><thead><tr><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">#</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Type</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Target</th></tr></thead><tbody>';targets.forEach((t,i)=>{html+='<tr style="border-bottom:1px solid var(--border);"><td style="padding:0.2rem 0.4rem;color:var(--text-3);">'+(i+1)+'</td><td style="padding:0.2rem 0.4rem;color:var(--accent);">'+t.type+'</td><td style="padding:0.2rem 0.4rem;color:var(--text-1);">'+t.target+'</td></tr>'});html+='</tbody></table></div>';el.style.display="block";el.innerHTML=html}
-async function launchRun(){const worker=document.getElementById("worker-select").value;const model=document.getElementById("model-select").value;if(!worker){alert("Select a worker first");return}if(_parsedTargets.length===0&&_workerSchema&&_workerSchema.parse){alert("Click Parse first to verify targets before running");return}if(_parsedTargets.length===0){alert("No targets detected — parse your input first");return}const targets=_parsedTargets.map(t=>t.target).join(" ");const params={mmsi:targets,worker,mode:"deep",profile:"",model};if(_workerSchema&&_workerSchema.fields){_workerSchema.fields.forEach(f=>{const el=document.getElementById("wf-"+f.name);if(el){if(f.name==="targets"){params.mmsi=_parsedTargets.map(t=>t.target).join(" ")}else if(f.name==="mode"){params.mode=el.value}else if(f.name==="profile"){params.profile=el.value}else{params[f.name]=el.value}}})}const body=Object.entries(params).map(([k,v])=>k+"="+encodeURIComponent(v)).join("&");const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});handleLaunchResponse(r)}
+async function launchRun(){const worker=document.getElementById("worker-select").value;const model=document.getElementById("model-select").value;if(!worker){alert("Select a worker first");return}if(_parsedTargets.length===0&&_workerSchema&&_workerSchema.parse){alert("Click Parse first to verify targets before running");return}if(_parsedTargets.length===0){alert("No targets detected — parse your input first");return}const targets=_parsedTargets.map(t=>t.target).join(" ");const batchSel=document.getElementById("batch-select");const batch=batchSel?parseInt(batchSel.value)||10:10;const params={mmsi:targets,worker,mode:"deep",profile:"",model,batch};if(_workerSchema&&_workerSchema.fields){_workerSchema.fields.forEach(f=>{const el=document.getElementById("wf-"+f.name);if(el){if(f.name==="targets"){params.mmsi=_parsedTargets.map(t=>t.target).join(" ")}else if(f.name==="mode"){params.mode=el.value}else if(f.name==="profile"){params.profile=el.value}else{params[f.name]=el.value}}})}const body=Object.entries(params).map(([k,v])=>k+"="+encodeURIComponent(v)).join("&");const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});handleLaunchResponse(r)}
 async function handleLaunchResponse(p){document.getElementById("run-btn").disabled=true;document.getElementById("run-btn").textContent="Running...";document.getElementById("stop-btn").style.display="inline-block";try{const r=await p;const d=await r.json();if(d.run_id){currentRunId=d.run_id;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+d.run_id;reportCache={};document.getElementById("report-tabs").style.display="none";document.getElementById("report-tabs").innerHTML="";document.getElementById("final-summary").style.display="none";document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";document.getElementById("assessment-view").innerHTML='<span style="color:var(--accent)">⏳ Run started... agents initializing.</span>';setTimeout(loadRuns,1000)}else if(d.error){alert("Error: "+d.error)}}catch(e){alert("Failed: "+e)}document.getElementById("run-btn").disabled=false;document.getElementById("run-btn").textContent="▶ Run"}
 async function stopRun(){if(!currentRunId)return;await fetch("/run/"+currentRunId+"/stop",{method:"POST"});document.getElementById("stop-btn").style.display="none";document.getElementById("selected-run").textContent="Stopped: "+currentRunId;setTimeout(loadRuns,1000)}
 async function loadProfileModels(profile){try{const r=await fetch("/api/profiles/models?_="+Date.now());const data=await r.json();const pk=profile||"";const ms=data[pk]||[];const sel=document.getElementById("model-select");sel.innerHTML=ms.map(m=>'<option value="'+m.value+'">'+m.label+"</option>").join("");if(!sel.value)sel.selectedIndex=0}catch(_){document.getElementById("model-select").innerHTML='<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>'}}

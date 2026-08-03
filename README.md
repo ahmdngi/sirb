@@ -335,6 +335,16 @@ Three-column layout matching shipcrawler:
 
 ## Changelog
 
+### v0.5.1 (2026-07-21)
+
+- **Parallelism selector** — choose batch size (5/10/15/20/25/30/50) in the dashboard right panel, controls `max_workers` in WorkerPool
+- **Terminal tab** (📡) — replays full SSE agent log history with colored per-vessel labels
+- **Vessel list** — name + warning tags (🔴 SHADOW, 🟡 SANCTIONED, 🟠 AIS DARK) shown above swarm report
+- **Swarm report** — vessel names extracted from `**Target:** NAME (IMO` in analyst reports, Tags column removed (shown above)
+- **`escapeHtml()`** — safe HTML rendering for terminal tab
+- **`/run/<rid>/terminal`** endpoint — returns agent log lines for SSE replay
+- **Profile/model providers** — `profiles-models.json` has correct `provider` field for all models
+
 ### v0.3.0 (2026-07-21)
 
 - **Core kernel wiring** — dashboard `_run_swarm` uses TaskQueue + WorkerPool + Blackboard instead of raw subprocesses
