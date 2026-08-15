@@ -1145,12 +1145,34 @@ def _dashboard(args):
                     return
                 raw_input = params.get("input", [""])[0]
                 targets = reg[wname].parse_targets(raw_input)
+                # If port scan mode, discover actual vessels from the port
+                if targets and targets[0].get("type") == "port" and targets[0]["target"].startswith("port:"):
+                    port_key = targets[0]["target"][5:]
+                    try:
+                        from shipcrawler_worker.discovery import PortConfig
+                        pc = PortConfig()
+                        pd = pc.get(port_key)
+                        if pd:
+                            port_cfg = {port_key: {
+                                "vessel_finder_url": pd.vessel_finder_url,
+                                "lat_min": pd.lat_min, "lat_max": pd.lat_max,
+                                "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                            os.environ["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
+                            import asyncio
+                            discovered = asyncio.run(reg[wname].discover())
+                            targets = [{"target": t.params.get("mmsi", t.id), "type": "MMSI",
+                                        "name": t.params.get("name", "")}
+                                       for t in discovered if t.params.get("mmsi")]
+                    except Exception as e:
+                        self._send_json({"error": f"Port discovery failed: {e}"}, 500)
+                        return
                 self._send_json({"targets": targets})
             elif path == "/run/new":
                 mmsis = params.get("mmsi", [""])[0].strip()
                 mode = params.get("mode", ["fast"])[0].strip()
                 profile = params.get("profile", [""])[0].strip()
                 model = params.get("model", [""])[0].strip()
+                provider_r = params.get("provider", [""])[0].strip()
                 batch = int(params.get("batch", ["10"])[0].strip() or "10")
                 if not mmsis:
                     self._send_json({"error": "No IMO/MMSI provided"}, 400)
@@ -1170,7 +1192,7 @@ def _dashboard(args):
                 (rundir / "tracking.json").write_text(json.dumps(tracking))
 
                 # Spawn hermes agents in background thread
-                def _run_swarm(rid, targets, md, prof, mod, worker_name="shipcrawler", batch=10):
+                def _run_swarm(rid, targets, md, prof, mod, prov="", worker_name="shipcrawler", batch=10):
                     """Run tasks via core kernel (TaskQueue + WorkerPool + Blackboard).
 
                     Agnostic: discovers workers via pip entry points — sirb
@@ -1190,7 +1212,7 @@ def _dashboard(args):
                     if worker_name not in registry:
                         # Fallback: no workers installed
                         tr = {"run_id": rid, "targets": targets, "mode": md,
-                              "model": mod or "glm-5.2",
+                              "model": mod or "deepseek-v4-flash",
                               "created_at": datetime.now(timezone.utc).isoformat(),
                               "status": "error",
                               "error": f"Worker '{worker_name}' not installed. pip install <worker-package>."}
@@ -1204,22 +1226,58 @@ def _dashboard(args):
                     queue = TaskQueue()
                     blackboard = Blackboard(decay_rate=0.9)
 
-                    # Add tasks to queue
-                    for target in targets:
-                        agent_dir = vessels_path / target
-                        agent_dir.mkdir(parents=True, exist_ok=True)
-                        log_path = vessels_path / f"{target}.log"
-                        task = Task(
-                            type="vessel_osint",
-                            worker=worker_name,
-                            params={"target": target, "mmsi": target, "run_id": rid,
-                                    "agent_dir": str(agent_dir),
-                                    "log_path": str(log_path),
-                                    "mode": md,
-                                    "profile": prof,
-                                    "model": mod},
-                        )
-                        queue.add(task)
+                    # Check for port scan mode (target starts with "port:")
+                    port_targets = [t for t in targets if t.startswith("port:")]
+                    if port_targets:
+                        # Port scan mode: set SIRB_WORKER_CONFIG and use worker.discover()
+                        port_key = port_targets[0][5:]  # strip "port:" prefix
+                        try:
+                            from shipcrawler_worker.discovery import PortConfig
+                            pc = PortConfig()
+                            pd = pc.get(port_key)
+                            if pd:
+                                port_cfg = {port_key: {
+                                    "vessel_finder_url": pd.vessel_finder_url,
+                                    "lat_min": pd.lat_min, "lat_max": pd.lat_max,
+                                    "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                                os.environ["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
+                        except Exception:
+                            pass
+                        # Call worker.discover() to get tasks from port scanner
+                        import asyncio
+                        discovered = asyncio.run(worker.discover())
+                        for task in discovered:
+                            task.params["run_id"] = rid
+                            task.params["mode"] = md
+                            task.params["profile"] = prof
+                            task.params["model"] = mod
+                            task.params["provider"] = prov
+                            target = task.params.get("mmsi", task.id)
+                            agent_dir = vessels_path / target
+                            agent_dir.mkdir(parents=True, exist_ok=True)
+                            task.params["agent_dir"] = str(agent_dir)
+                            task.params["log_path"] = str(vessels_path / f"{target}.log")
+                            queue.add(task)
+                        # Update targets list for tracking
+                        targets = [t.params.get("mmsi", t.id) for t in discovered]
+                    else:
+                        # Normal mode: create tasks from targets list
+                        for target in targets:
+                            agent_dir = vessels_path / target
+                            agent_dir.mkdir(parents=True, exist_ok=True)
+                            log_path = vessels_path / f"{target}.log"
+                            task = Task(
+                                type="vessel_osint",
+                                worker=worker_name,
+                                params={"target": target, "mmsi": target, "run_id": rid,
+                                        "agent_dir": str(agent_dir),
+                                        "log_path": str(log_path),
+                                        "mode": md,
+                                        "profile": prof,
+                                        "model": mod,
+                                        "provider": prov},
+                            )
+                            queue.add(task)
 
                     # Update tracking
                     def _update_tracking(status, agents_data=None):
@@ -1231,7 +1289,7 @@ def _dashboard(args):
                             except Exception:
                                 agents_data = {}
                         tr = {"run_id": rid, "targets": targets, "mode": md,
-                              "model": mod or "glm-5.2",
+                              "model": mod or "deepseek-v4-flash",
                               "created_at": datetime.now(timezone.utc).isoformat(),
                               "status": status, "agents": agents_data}
                         tr_path.write_text(json.dumps(tr))
@@ -1294,9 +1352,9 @@ def _dashboard(args):
                     report = _generate_swarm_report(rid, targets, md, agents, connections)
                     (runs_base / rid / "swarm-report.md").write_text(report)
 
-                def _run_swarm_safe(rid, targets, md, prof, mod, worker_name="shipcrawler", batch=10):
+                def _run_swarm_safe(rid, targets, md, prof, mod, prov, worker_name="shipcrawler", batch=10):
                     try:
-                        _run_swarm(rid, targets, md, prof, mod, worker_name, batch)
+                        _run_swarm(rid, targets, md, prof, mod, prov, worker_name, batch)
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()
@@ -1307,7 +1365,7 @@ def _dashboard(args):
 
                 thread = threading.Thread(
                     target=_run_swarm_safe,
-                    args=(run_id, mmsi_list, mode, profile, model, worker_name, batch),
+                    args=(run_id, mmsi_list, mode, profile, model, provider_r, worker_name, batch),
                     daemon=True,
                 )
                 thread.start()
@@ -1696,7 +1754,7 @@ nav .nav-link:hover { color:var(--accent); }
       <!-- Parse preview -->
       <div id="parse-preview" style="display:none;"></div>
       <div class="form-group"><label>Model</label><select id="model-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="">Loading models...</option></select></div>
-      <div class="form-group"><label>Parallelism</label><select id="batch-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="50">50</option></select></div>
+      <div class="form-group"><label>Parallelism</label><select id="batch-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;width:100%;"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="50">50</option><option value="100">100</option></select></div>
       <div class="btn-row"><button class="btn btn-primary" id="run-btn" onclick="launchRun()">▶ Run</button><button class="btn btn-danger" id="stop-btn" onclick="stopRun()" style="display:none">■ Stop</button></div>
       <hr style="border-color:var(--border);margin:1em 0;" />
       <div id="globe-container" style="position:sticky;bottom:0;width:100%;height:200px;border-radius:8px;overflow:hidden;margin-top:auto;"></div>
@@ -1736,14 +1794,14 @@ function escapeHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;
 async function loadWorkers(){try{const r=await fetch("/api/workers?_="+Date.now());const data=await r.json();const sel=document.getElementById("worker-select");if(!data.length){sel.innerHTML='<option value="">No workers installed</option>';return}sel.innerHTML=data.map(w=>'<option value="'+w.name+'">'+w.name+(w.description?" — "+w.description:"")+"</option>").join("");if(!sel.value&&data.length)sel.selectedIndex=0;onWorkerChange()}catch(_){document.getElementById("worker-select").innerHTML='<option value="shipcrawler">shipcrawler</option>'}}
 let _workerSchema=null,_parsedTargets=[];
 async function onWorkerChange(){const w=document.getElementById("worker-select").value;if(!w)return;document.getElementById("parse-preview").style.display="none";_parsedTargets=[];try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/schema?_="+Date.now());const schema=await r.json();_workerSchema=schema;renderWorkerForm(schema);const pf=document.getElementById("wf-profile");if(pf){loadProfileModels(pf.value||"")}}catch(_){document.getElementById("worker-form").innerHTML='<div style="color:var(--text-3);font-size:0.78rem;">No form available for this worker</div>'}}
-function renderWorkerForm(schema){if(!schema||!schema.fields){document.getElementById("worker-form").innerHTML="";return}let html="";schema.fields.forEach(f=>{const fid="wf-"+f.name;var onchange="";if(f.name==="profile"){onchange=' onchange="onProfileFormChange()"'}if(f.type==="textarea"){html+='<div class="form-group"><label>'+f.label+'</label><textarea id="'+fid+'" placeholder="'+(f.placeholder||"")+'" style="width:100%;min-height:80px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;resize:vertical;">'+(f.default||"")+'</textarea></div>'}else if(f.type==="select"){html+='<div class="form-group"><label>'+f.label+'</label><select id="'+fid+'"'+onchange+' style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;">'+(f.options||[]).map(o=>'<option value="'+o.value+'"'+(o.value===(f.default||"")?" selected":"")+" >"+o.label+"</option>").join("")+'</select></div>'}else if(f.type==="number"){html+='<div class="form-group"><label>'+f.label+'</label><input id="'+fid+'" type="number" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" /></div>'}else{html+='<div class="form-group"><label>'+f.label+'</label><input id="'+fid+'" type="text" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" /></div>'}if(f.parse){html+='<button class="btn" style="margin-top:0.3rem;width:100%;" onclick="parseInput(\''+f.name+'\')">🔍 Parse</button>'}});document.getElementById("worker-form").innerHTML=html}
+function updateFieldVisibility(){var st=document.getElementById("wf-scan_type");if(!st)return;document.querySelectorAll("[data-visible-when]").forEach(el=>{var vw=el.getAttribute("data-visible-when");var parts=vw.split("=");var field=parts[0];var val=parts[1]||"";var target=document.getElementById("wf-"+field);if(!target){el.style.display="none";return}el.style.display=(target.value===val)?"":"none"})}function renderWorkerForm(schema){if(!schema||!schema.fields){document.getElementById("worker-form").innerHTML="";return}let html="";schema.fields.forEach(f=>{const fid="wf-"+f.name;var onchange="";if(f.name=="profile"){onchange=' onchange="onProfileFormChange()"'}if(f.onchange){onchange=' onchange="updateFieldVisibility()"'}var vwAttr="";if(f.visible_when){vwAttr=' data-visible-when="'+f.visible_when.field+"="+f.visible_when.value+'"'}var fgOpen='<div class="form-group"'+vwAttr+'>';var fgClose="</div>";if(f.type=="textarea"){html+=fgOpen+'<label>'+f.label+'</label><textarea id="'+fid+'" placeholder="'+(f.placeholder||"")+'" style="width:100%;min-height:80px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;resize:vertical;">'+(f.default||"")+'</textarea>'+fgClose}else if(f.type=="select"){html+=fgOpen+'<label>'+f.label+'</label><select id="'+fid+'"'+onchange+' style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;">'+(f.options||[]).map(o=>'<option value="'+o.value+'"'+(o.value===(f.default||"")?" selected":"")+" >"+o.label+"</option>").join("")+'</select>'+fgClose}else if(f.type=="number"){html+=fgOpen+'<label>'+f.label+'</label><input id="'+fid+'" type="number" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" />'+fgClose}else{html+=fgOpen+'<label>'+f.label+'</label><input id="'+fid+'" type="text" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" />'+fgClose}if(f.parse){html+='<button class="btn" style="margin-top:0.3rem;width:100%;" onclick="parseInput(\''+f.name+'\')">🔍 Parse</button>'}});document.getElementById("worker-form").innerHTML=html;updateFieldVisibility()}
 function onProfileFormChange(){const el=document.getElementById("wf-profile");if(el)loadProfileModels(el.value)}
-async function parseInput(fieldName){const w=document.getElementById("worker-select").value;const input=document.getElementById("wf-"+fieldName).value;if(!input.trim()){alert("Enter some text first");return}try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/parse",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"input="+encodeURIComponent(input)});const data=await r.json();_parsedTargets=data.targets||[];showParsePreview(_parsedTargets)}catch(e){alert("Parse failed: "+e)}}
+async function parseInput(fieldName){const w=document.getElementById("worker-select").value;var input=document.getElementById("wf-"+fieldName).value;if(!input.trim()){alert("Enter some text first");return}var st=document.getElementById("wf-scan_type");if(st&&st.value==="port"){var portEl=document.getElementById("wf-port");var portVal=portEl?portEl.value:"tallinn";input="port:"+portVal}try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/parse",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"input="+encodeURIComponent(input)});const data=await r.json();_parsedTargets=data.targets||[];showParsePreview(_parsedTargets)}catch(e){alert("Parse failed: "+e)}}
 function showParsePreview(targets){const el=document.getElementById("parse-preview");if(!targets.length){el.style.display="block";el.innerHTML='<div style="color:var(--red);font-size:0.78rem;padding:0.5rem;">No targets detected.</div>';return}let html='<div style="background:var(--bg-3);border:1px solid var(--border);border-radius:6px;padding:0.5rem;margin-top:0.5rem;"><div style="font-size:0.75rem;color:var(--accent);font-weight:600;margin-bottom:0.3rem;">Found '+targets.length+' target'+(targets.length>1?"s":"")+':</div>';html+='<table style="width:100%;font-size:0.75rem;font-family:JetBrains Mono,monospace;"><thead><tr><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">#</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Type</th><th style="text-align:left;padding:0.2rem 0.4rem;color:var(--text-2);">Target</th></tr></thead><tbody>';targets.forEach((t,i)=>{html+='<tr style="border-bottom:1px solid var(--border);"><td style="padding:0.2rem 0.4rem;color:var(--text-3);">'+(i+1)+'</td><td style="padding:0.2rem 0.4rem;color:var(--accent);">'+t.type+'</td><td style="padding:0.2rem 0.4rem;color:var(--text-1);">'+t.target+'</td></tr>'});html+='</tbody></table></div>';el.style.display="block";el.innerHTML=html}
-async function launchRun(){const worker=document.getElementById("worker-select").value;const model=document.getElementById("model-select").value;if(!worker){alert("Select a worker first");return}if(_parsedTargets.length===0&&_workerSchema&&_workerSchema.parse){alert("Click Parse first to verify targets before running");return}if(_parsedTargets.length===0){alert("No targets detected — parse your input first");return}const targets=_parsedTargets.map(t=>t.target).join(" ");const batchSel=document.getElementById("batch-select");const batch=batchSel?parseInt(batchSel.value)||10:10;const params={mmsi:targets,worker,mode:"deep",profile:"",model,batch};if(_workerSchema&&_workerSchema.fields){_workerSchema.fields.forEach(f=>{const el=document.getElementById("wf-"+f.name);if(el){if(f.name==="targets"){params.mmsi=_parsedTargets.map(t=>t.target).join(" ")}else if(f.name==="mode"){params.mode=el.value}else if(f.name==="profile"){params.profile=el.value}else{params[f.name]=el.value}}})}const body=Object.entries(params).map(([k,v])=>k+"="+encodeURIComponent(v)).join("&");const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});handleLaunchResponse(r)}
+async function launchRun(){const worker=document.getElementById("worker-select").value;const model=document.getElementById("model-select").value;if(!worker){alert("Select a worker first");return}if(_parsedTargets.length===0&&_workerSchema&&_workerSchema.parse){alert("Click Parse first to verify targets before running");return}if(_parsedTargets.length===0){alert("No targets detected - parse your input first");return}const targets=_parsedTargets.map(t=>t.target).join(" ");const batchSel=document.getElementById("batch-select");const batch=batchSel?parseInt(batchSel.value)||10:10;const modelSel=document.getElementById("model-select");var provider="";if(modelSel&&modelSel.selectedIndex>=0){provider=modelSel.options[modelSel.selectedIndex].getAttribute("data-provider")||""}const params={mmsi:targets,worker,mode:"deep",profile:"",model,batch,provider};if(_workerSchema&&_workerSchema.fields){_workerSchema.fields.forEach(f=>{const el=document.getElementById("wf-"+f.name);if(el){if(f.name==="targets"){params.mmsi=_parsedTargets.map(t=>t.target).join(" ")}else if(f.name==="mode"){params.mode=el.value}else if(f.name==="profile"){params.profile=el.value}else if(f.name==="scan_type"){params.scan_type=el.value}else if(f.name==="port"){params.port=el.value}else{params[f.name]=el.value}}})}const body=Object.entries(params).map(([k,v])=>k+"="+encodeURIComponent(v)).join("&");const r=await fetch("/run/new",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});handleLaunchResponse(r)}
 async function handleLaunchResponse(p){document.getElementById("run-btn").disabled=true;document.getElementById("run-btn").textContent="Running...";document.getElementById("stop-btn").style.display="inline-block";try{const r=await p;const d=await r.json();if(d.run_id){currentRunId=d.run_id;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+d.run_id;reportCache={};document.getElementById("report-tabs").style.display="none";document.getElementById("report-tabs").innerHTML="";document.getElementById("final-summary").style.display="none";document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";document.getElementById("assessment-view").innerHTML='<span style="color:var(--accent)">⏳ Run started... agents initializing.</span>';setTimeout(loadRuns,1000)}else if(d.error){alert("Error: "+d.error)}}catch(e){alert("Failed: "+e)}document.getElementById("run-btn").disabled=false;document.getElementById("run-btn").textContent="▶ Run"}
 async function stopRun(){if(!currentRunId)return;await fetch("/run/"+currentRunId+"/stop",{method:"POST"});document.getElementById("stop-btn").style.display="none";document.getElementById("selected-run").textContent="Stopped: "+currentRunId;setTimeout(loadRuns,1000)}
-async function loadProfileModels(profile){try{const r=await fetch("/api/profiles/models?_="+Date.now());const data=await r.json();const pk=profile||"";const ms=data[pk]||[];const sel=document.getElementById("model-select");sel.innerHTML=ms.map(m=>'<option value="'+m.value+'">'+m.label+"</option>").join("");if(!sel.value)sel.selectedIndex=0}catch(_){document.getElementById("model-select").innerHTML='<option value="deepseek-v4-flash">DeepSeek V4 Flash</option>'}}
+async function loadProfileModels(profile){try{const r=await fetch("/api/profiles/models?_="+Date.now());const data=await r.json();const pk=profile||"";const ms=data[pk]||[];const sel=document.getElementById("model-select");sel.innerHTML=ms.map(m=>'<option value="'+m.value+'" data-provider="'+(m.provider||"")+'">'+m.label+"</option>").join("");if(!sel.value)sel.selectedIndex=0}catch(_){document.getElementById("model-select").innerHTML='<option value="deepseek-v4-flash" data-provider="deepseek">DeepSeek V4 Flash</option>'}}
 function goHome(){currentRunId=null;document.getElementById("sirb-hero").style.display="";document.getElementById("selected-run").textContent="No run selected";document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));document.getElementById("report-tabs").style.display="none";document.getElementById("report-tabs").innerHTML="";document.getElementById("final-summary").style.display="none";document.getElementById("final-summary").innerHTML="";document.getElementById("live-stats").innerHTML="";document.getElementById("agent-cards").innerHTML="";document.getElementById("assessment-view").innerHTML='<div style="color:var(--text-3);font-size:0.82rem;line-height:1.6;"><div style="color:var(--accent);font-weight:600;">$ sirb --status</div><div style="margin-top:0.5rem;">SIRB Swarm v0.3 — Agentic task orchestration engine</div><div style="margin-top:0.3rem;color:var(--text-3);">No active runs. Select a worker, paste targets, and launch a swarm investigation.</div><div style="margin-top:0.3rem;color:var(--text-3);">Past runs are available in the left sidebar.</div><div style="margin-top:0.5rem;color:var(--accent);">$ <span class="prompt-cursor">▊</span></div></div>';reportCache={}}
 function applyTheme(t){document.documentElement.setAttribute('data-theme',t);document.querySelectorAll('.theme-pill').forEach(p=>p.classList.toggle('active',p.dataset.theme===t));try{localStorage.setItem('sirb-theme',t)}catch(_){}}
 function loadTheme(){try{const t=localStorage.getItem('sirb-theme')||'dark';applyTheme(t)}catch(_){applyTheme('dark')}}
