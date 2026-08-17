@@ -28,7 +28,11 @@ from sirb.core import (
 from sirb.core.worker_base import SirbWorker
 
 
-_SIRB_VERSION = "0.2.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    _SIRB_VERSION = _pkg_version("sirb")
+except Exception:
+    _SIRB_VERSION = "unknown"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
@@ -1817,6 +1821,9 @@ document.getElementById("live-stats").innerHTML="";document.getElementById("agen
 </script>
 </body>
 </html>"""
+            # Inject runtime version so dashboard stays in sync with pyproject.toml
+            html = html.replace("SIRB v0.3", f"SIRB v{_SIRB_VERSION}")
+            html = html.replace("SIRB Swarm v0.3", f"SIRB Swarm v{_SIRB_VERSION}")
             self._send_html(html)
 
         # ── SSE ──────────────────────────────────────────────────────
