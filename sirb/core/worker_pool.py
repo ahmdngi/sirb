@@ -51,11 +51,16 @@ class WorkerPool:
             Number of tasks completed.
         """
         completed = 0
+        start_time = time.time()
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             futures = {}
 
             while True:
+                # Check overall timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    break
+
                 # Submit more tasks until pool is full
                 while len(futures) < self._max_workers:
                     task = self._queue.claim("pool")
@@ -82,24 +87,31 @@ class WorkerPool:
                 if not futures:
                     break  # no work and nothing running
 
-                # Wait for at least one to complete
-                for future in as_completed(
-                    futures,
-                    timeout=self._task_timeout if self._task_timeout else None,
-                ):
-                    task = futures.pop(future)
-                    try:
-                        result = future.result(timeout=5)
-                        self._handle_result(task, result)
-                        if self._on_complete:
-                            self._on_complete(task, result)
-                        completed += 1
-                    except Exception as e:
-                        self._queue.fail(
-                            task.id,
-                            f"worker exception: {e}",
-                            task.version,
-                        )
+                # Wait for at least one to complete (per-task timeout for iterator)
+                remaining = None
+                if timeout:
+                    remaining = max(1, timeout - (time.time() - start_time))
+                try:
+                    for future in as_completed(
+                        futures,
+                        timeout=remaining,
+                    ):
+                        task = futures.pop(future)
+                        try:
+                            result = future.result(timeout=5)
+                            self._handle_result(task, result)
+                            if self._on_complete:
+                                self._on_complete(task, result)
+                            completed += 1
+                        except Exception as e:
+                            self._queue.fail(
+                                task.id,
+                                f"worker exception: {e}",
+                                task.version,
+                            )
+                except TimeoutError:
+                    # Overall timeout expired or no future completed in time
+                    break
 
         return completed
 
@@ -166,8 +178,10 @@ class WorkerPool:
                     valid = asyncio.run(worker.validate(result))
                 else:
                     valid = worker.validate(result)
-            except Exception:
-                valid = True
+            except Exception as exc:
+                # Validation itself failed — log and treat as invalid
+                print(f"[sirb] WARN: validation error for {task.id}: {exc}")
+                valid = False
             if not valid:
                 self._queue.fail(
                     task.id, f"validation rejected: {result.error}", task.version

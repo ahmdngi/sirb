@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .models import Task, Result, TaskStatus
+from .models import Task, TaskStatus
 from .registry import WorkerRegistry
 from .worker_base import SirbWorker
 

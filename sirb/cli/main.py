@@ -5,13 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
 import threading
 import time
 import urllib.parse
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,8 @@ try:
 except Exception:
     _SIRB_VERSION = "unknown"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -523,14 +525,19 @@ def _dashboard(args):
     port = args.port
     run_id_filter = args.run_id
     runs_base = _get_runs_dir(args)
-    running_procs: dict[str, subprocess.Popen] = {}
+    running_procs: dict[str, object] = {}  # stores subprocess.Popen or threading.Thread
     proc_lock = threading.Lock()
 
-    def _load_assessment_json(rid: str) -> dict:
-        sjp = runs_base / rid / "assessment-summary.json"
-        if sjp.exists():
-            return json.loads(sjp.read_text())
-        return {}
+    # Cached worker registry — avoids re-scanning pip entry points per request
+    _registry_cache: WorkerRegistry | None = None
+
+    def _get_registry() -> WorkerRegistry:
+        nonlocal _registry_cache
+        if _registry_cache is None:
+            _registry_cache = WorkerRegistry()
+            _registry_cache.discover()
+            _registry_cache.discover_entry_points()
+        return _registry_cache
 
     def _load_models() -> list[str]:
         """Read available models from Hermes config + known provider caches."""
@@ -969,9 +976,7 @@ def _dashboard(args):
                     vd = runs_base / rid / "vessels"
                     # Use worker's extract_stats (agnostic — no hardcoded stats)
                     from sirb.core.registry import WorkerRegistry
-                    reg = WorkerRegistry()
-                    reg.discover()
-                    reg.discover_entry_points()
+                    reg = _get_registry()
                     worker_name = tr.get("worker", "shipcrawler")
                     if worker_name not in reg:
                         self._send_json({"error": f"worker '{worker_name}' not installed"})
@@ -1007,11 +1012,21 @@ def _dashboard(args):
                 rid = parts[2]
                 target = parts[4]
                 filename = parts[5]
-                fp = runs_base / rid / "vessels" / target / filename
-                if fp.exists():
-                    self._send_html(fp.read_text())
+                # Sanitize against path traversal
+                if ".." in rid or ".." in target or ".." in filename:
+                    self._send_html("<p>Invalid path.</p>", 400)
                 else:
-                    self._send_html("<p>File not found.</p>", 404)
+                    fp = runs_base / rid / "vessels" / target / filename
+                    # Verify the resolved path is within runs_base
+                    try:
+                        fp.resolve().relative_to(runs_base.resolve())
+                    except ValueError:
+                        self._send_html("<p>Invalid path.</p>", 400)
+                    else:
+                        if fp.exists():
+                            self._send_html(fp.read_text())
+                        else:
+                            self._send_html("<p>File not found.</p>", 404)
             elif re.match(r"^/run/[^/]+/targets$", path):
                 # List per-target report files (agnostic — used by per_target tabs)
                 rid = path.split("/")[2]
@@ -1075,9 +1090,7 @@ def _dashboard(args):
             elif path == "/api/workers":
                 # List installed SirbWorkers (discovered via entry points)
                 from sirb.core.registry import WorkerRegistry
-                reg = WorkerRegistry()
-                reg.discover()
-                reg.discover_entry_points()
+                reg = _get_registry()
                 workers = []
                 for name, w in reg.items():
                     workers.append({"name": name, "description": getattr(w, "description", "")})
@@ -1086,9 +1099,7 @@ def _dashboard(args):
                 # Get input form schema for a specific worker
                 wname = path.split("/")[3]
                 from sirb.core.registry import WorkerRegistry
-                reg = WorkerRegistry()
-                reg.discover()
-                reg.discover_entry_points()
+                reg = _get_registry()
                 if wname in reg:
                     self._send_json(reg[wname].input_schema())
                 else:
@@ -1097,9 +1108,7 @@ def _dashboard(args):
                 # Get stats bar schema for a specific worker
                 wname = path.split("/")[3]
                 from sirb.core.registry import WorkerRegistry
-                reg = WorkerRegistry()
-                reg.discover()
-                reg.discover_entry_points()
+                reg = _get_registry()
                 if wname in reg:
                     self._send_json(reg[wname].stats_schema())
                 else:
@@ -1108,9 +1117,7 @@ def _dashboard(args):
                 # Get report tab definitions for a specific worker
                 wname = path.split("/")[3]
                 from sirb.core.registry import WorkerRegistry
-                reg = WorkerRegistry()
-                reg.discover()
-                reg.discover_entry_points()
+                reg = _get_registry()
                 if wname in reg:
                     self._send_json(reg[wname].report_tabs(""))
                 else:
@@ -1141,9 +1148,7 @@ def _dashboard(args):
                 # Parse raw input into structured targets
                 wname = path.split("/")[3]
                 from sirb.core.registry import WorkerRegistry
-                reg = WorkerRegistry()
-                reg.discover()
-                reg.discover_entry_points()
+                reg = _get_registry()
                 if wname not in reg:
                     self._send_json({"error": "worker not found"}, 404)
                     return
@@ -1384,9 +1389,12 @@ def _dashboard(args):
                     proc = running_procs.pop(rid, None)
                 if proc:
                     try:
-                        proc.terminate()
-                    except Exception:
-                        pass
+                        # proc may be a subprocess.Popen (has .terminate)
+                        # or a threading.Thread (has .join, no .terminate)
+                        if hasattr(proc, "terminate"):
+                            proc.terminate()
+                    except Exception as exc:
+                        logger.warning(f"Stop failed for {rid}: {exc}")
                     self._send_json({"status": "stopped"})
                 else:
                     self._send_json({"status": "not_running"})
@@ -1486,7 +1494,17 @@ def _dashboard(args):
             path = parsed.path
             if path.startswith("/run/"):
                 rid = path.split("/")[2]
+                # Sanitize against path traversal
+                if ".." in rid or "/" in rid:
+                    self._send_json({"error": "invalid run id"}, 400)
+                    return
                 rundir = runs_base / rid
+                # Verify resolved path is within runs_base
+                try:
+                    rundir.resolve().relative_to(runs_base.resolve())
+                except ValueError:
+                    self._send_json({"error": "invalid path"}, 400)
+                    return
                 if rundir.exists():
                     import shutil
                     shutil.rmtree(str(rundir))
