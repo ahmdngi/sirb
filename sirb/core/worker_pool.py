@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
-from .models import Task, Result, TaskStatus
+from .models import Task, Result
 from .task_queue import TaskQueue
 from .router import Router
 from .worker_base import SirbWorker
