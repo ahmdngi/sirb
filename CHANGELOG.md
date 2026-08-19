@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.3 (2026-08-19)
+
+### Fixed
+- **Auto-load report when SSE sends Status=done.** Dashboard stayed frozen showing
+  agent activity after run completed — never transitioned to report view. Now
+  auto-calls `selectRun()` when SSE receives `Status: "done"`.
+- **profiles-models.json missing from package-data.** Model dropdown was broken —
+  `profiles-models.json` not in `pyproject.toml` package-data, so editable install
+  didn't map it. Added to package-data, force-reinstalled.
+
 ## v0.5.2 (2026-08-19)
 
 ### Fixed
