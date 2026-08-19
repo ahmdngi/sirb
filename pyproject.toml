@@ -23,4 +23,4 @@ where = ["."]
 include = ["sirb*"]
 
 [tool.setuptools.package-data]
-sirb = ["templates/*.j2", "cli/stream_formatter.py"]
+sirb = ["templates/*.j2", "cli/stream_formatter.py", "cli/profiles-models.json"]
