@@ -246,3 +246,71 @@ class TestBlackboard:
 def asyncio_run(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+# ── WorkerPool finalization regression ───────────────────────────────────
+
+class TestWorkerPoolFinalization:
+    """Regression test for v0.5.3 bug: tasks stuck RUNNING after pool.run().
+
+    Root cause: claim() bumps version to v+1 and returns a frozen copy;
+    start() bumps the real task to v+2; _handle_result passed the stale
+    frozen copy's version (v+1) to complete()/fail(), which always failed
+    the version check. Fix: start() now returns the post-start version
+    and WorkerPool stashes it on the task copy before execution.
+    """
+
+    def test_task_completes_after_pool_run(self):
+        """After pool.run(), the task must be COMPLETED, not stuck RUNNING."""
+        from sirb.core import Result
+        from sirb.core.worker_pool import WorkerPool
+
+        class SuccessWorker(SirbWorker):
+            name = "success-worker"
+            async def execute(self, task):
+                return Result(task_id=task.id, worker=self.name,
+                              status="success")
+
+        q = TaskQueue()
+        q.add(Task(id="t1", worker="success-worker", type="scan"))
+        pool = WorkerPool(q, Router({"success-worker": SuccessWorker()}),
+                          max_workers=1)
+        completed = pool.run()
+
+        assert completed == 1
+        fresh = q.get("t1")
+        assert fresh.status == TaskStatus.COMPLETED, \
+            f"expected COMPLETED, got {fresh.status}"
+
+    def test_task_fails_and_retries_after_pool_run(self):
+        """A failing task must transition to PENDING (retry) or FAILED."""
+        from sirb.core import Result
+        from sirb.core.worker_pool import WorkerPool
+
+        class FailWorker(SirbWorker):
+            name = "fail-worker"
+            async def execute(self, task):
+                return Result(task_id=task.id, worker=self.name,
+                              status="failure", error="boom")
+
+        q = TaskQueue()
+        q.add(Task(id="t2", worker="fail-worker", type="scan", max_retries=2))
+        pool = WorkerPool(q, Router({"fail-worker": FailWorker()}),
+                          max_workers=1, max_failures=10)
+        pool.run()
+
+        fresh = q.get("t2")
+        assert fresh.status in (TaskStatus.PENDING, TaskStatus.FAILED), \
+            f"expected PENDING or FAILED, got {fresh.status}"
+
+    def test_start_returns_new_version(self):
+        """start() must return the post-transition version, not a bool."""
+        q = TaskQueue()
+        t = Task(id="t3", worker="w", type="scan")
+        q.add(t)
+        claimed = q.claim("w")
+        assert claimed is not None
+        new_ver = q.start(claimed.id, claimed.version)
+        assert new_ver > claimed.version, \
+            f"start() must return new version > {claimed.version}, got {new_ver}"
+        assert new_ver > 0  # not -1 (failure)

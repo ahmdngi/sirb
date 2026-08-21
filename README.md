@@ -4,7 +4,7 @@
   <img src="sirb/cli/logo.png" alt="Sirb Logo" width="300">
 </p>
 
-**v0.5.0** — Lightweight, zero-framework-dependency task orchestration engine.
+**v0.5.4** — Lightweight, zero-framework-dependency task orchestration engine.
 
 Manages N worker agents executing tasks concurrently from a thread-safe queue,
 routes them by type to registered workers, persists findings on a shared
@@ -82,8 +82,8 @@ sirb run
 ### Agnosticism (guaranteed)
 | Commitment | Evidence |
 |------------|----------|
-| **No domain-specific code in core/** | Audit clean. Zero references to vessel, MMSI, IMO, Shodan, Equasis, VSAT, shadow fleet, LinkedIn, personnel. |
-|| **No domain-specific code in cli/** | Audit clean. CLI has no domain knowledge. Dashboard discovers workers via `WorkerRegistry.discover_entry_points()` — no hardcoded worker imports. |
+| **No domain-specific code in core/** | Zero references to vessel, MMSI, IMO, Shodan, Equasis, VSAT, shadow fleet, LinkedIn, personnel. |
+|| **No domain-specific code in cli/** | CLI has no hardcoded worker imports. Dashboard discovers workers via `WorkerRegistry.discover_entry_points()` — port resolution delegated to workers via `resolve_port_config()`. |
 | **Workers are external** | Sirb never imports a worker's Python modules. Workers are pip-installed packages discovered via `sirb_workers` entry points. Dashboard `/api/workers` endpoint lists installed workers dynamically. |
 | **Generic data model** | `Task`, `Result`, `Finding` — no vessel/domain fields. `target_id` and `target_type` are free-form strings. |
 
@@ -242,8 +242,8 @@ Package separately and pip-install. Sirb will auto-discover it via entry points.
 ## Tests
 
 ```
-src/sirb/ ── 70 tests (core + queue + dedup + throttling + triggers +
-             correlation + aggregator + health + webhook + trends)
+tests/ ── 70+ tests (core + queue + dedup + throttling + triggers +
+              correlation + aggregator + health + webhook + trends)
 ```
 
 ## Workers

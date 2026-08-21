@@ -24,7 +24,6 @@ class WorkerRegistry(dict[str, SirbWorker]):
     2. ``discover_entry_points()`` — pip-installed packages with
        ``sirb_workers`` entry point group
     3. ``discover_package()`` — filesystem scan of a Python package
-    4. ``discover_filesystem()`` — scan a directory for ``*_worker.py``
     """
 
     def discover(self, config_workers: dict[str, dict] = None,

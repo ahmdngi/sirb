@@ -113,12 +113,23 @@ class TaskQueue:
 
             return Task.from_dict(chosen.to_dict())
 
-    def start(self, task_id: str, expected_version: int) -> bool:
-        """Mark a claimed task as RUNNING. Returns False on version mismatch."""
-        return self._transition(
+    def start(self, task_id: str, expected_version: int) -> int:
+        """Mark a claimed task as RUNNING.
+
+        Returns the new version on success, or -1 on version mismatch.
+        Callers must pass the returned version to complete()/fail() so the
+        optimistic-concurrency check matches — the frozen copy from claim()
+        holds the pre-start version, which would otherwise mismatch.
+        """
+        ok = self._transition(
             task_id, expected_version,
             {TaskStatus.CLAIMED}, TaskStatus.RUNNING,
         )
+        if not ok:
+            return -1
+        with self._lock:
+            task = self._tasks.get(task_id)
+            return task.version if task else -1
 
     def complete(self, task_id: str, expected_version: int) -> bool:
         """Mark a running task as COMPLETED. Removes seen hash on success."""

@@ -76,8 +76,15 @@ class WorkerPool:
                         )
                         continue
 
-                    if not self._queue.start(task.id, task.version):
+                    new_version = self._queue.start(task.id, task.version)
+                    if new_version < 0:
                         continue  # version mismatch, skip
+
+                    # Stash the post-start version on the frozen copy so
+                    # _handle_result passes the correct version to
+                    # complete()/fail(). The frozen copy from claim() holds
+                    # the pre-start version, which would otherwise mismatch.
+                    task.version = new_version
 
                     future = executor.submit(
                         self._execute_wrapper, worker, task
@@ -197,7 +204,18 @@ class WorkerPool:
             )
 
     def _enforce_throttle(self, worker: SirbWorker):
-        """Apply token bucket rate limits for this worker."""
+        """Apply token bucket rate limits for this worker.
+
+        Bounded by task_timeout — a zero-refill bucket can't spin forever.
+        """
         limits = worker.rate_limits()
         for resource in limits:
-            self._throttle.acquire(worker.name, resource, block=True)
+            deadline = time.time() + (self._task_timeout or 300)
+            while True:
+                if self._throttle.acquire(worker.name, resource, block=False):
+                    break
+                if time.time() >= deadline:
+                    print(f"[sirb] WARN: throttle '{resource}' for "
+                          f"'{worker.name}' timed out — proceeding")
+                    break
+                time.sleep(0.25)

@@ -192,7 +192,7 @@ class SirbWorker(ABC):
             Dict of stat values, e.g. {"tool_calls": 45, "shodan": 4, ...}
 
         Default implementation extracts generic stats from the hermes
-        session summary. Override to add worker-specific stats.
+            session summary. Override to add worker-specific stats.
         """
         import re
         from pathlib import Path
@@ -214,6 +214,18 @@ class SirbWorker(ABC):
         stats["model"] = m.group(1) if m else "—"
 
         return stats
+
+    def resolve_port_config(self, port_key: str) -> dict | None:
+        """Resolve a port name to a bounding-box config dict.
+
+        Called by the dashboard when a user selects "port:<name>" as a target.
+        Returns a dict with keys like ``vessel_finder_url``, ``lat_min``,
+        ``lat_max``, ``lon_min``, ``lon_max``, or None if the port is unknown.
+
+        Default implementation returns None (worker doesn't support ports).
+        Override in workers that know about specific ports.
+        """
+        return None
 
     @property
     def config_schema(self) -> dict[str, Any] | None:

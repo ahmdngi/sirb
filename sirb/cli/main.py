@@ -25,6 +25,7 @@ from sirb.core import (
     Task, Finding, TaskQueue, WorkerRegistry, Router,
     WorkerPool, Checkpointer, Blackboard, TokenBucketPool,
 )
+from sirb.core.models import TaskStatus
 from sirb.core.worker_base import SirbWorker
 
 
@@ -86,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     dash_p = sub.add_parser("dashboard", help="Start live SSE dashboard for a running/previous run")
     dash_p.add_argument("--port", type=int, default=8100,
                         help="HTTP port (default: 8100)")
+    dash_p.add_argument("--host", default="127.0.0.1",
+                        help="Bind address (default: 127.0.0.1; use 0.0.0.0 for LAN)")
     dash_p.add_argument("--run-id", help="Specific run to watch (default: latest)")
 
     return p
@@ -937,35 +940,53 @@ def _dashboard(args):
             elif path == "/runs":
                 self._send_json(_list_runs())
             elif path.startswith("/run/") and path.endswith("/json"):
-                rid = path.split("/")[2]
-                self._send_json(_load_assessment_json(rid))
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
+                else:
+                    self._send_json(_load_assessment_json(rid))
             elif path.startswith("/run/") and path.endswith("/assessment"):
-                rid = path.split("/")[2]
-                md = _load_assessment(rid)
-                self._send_html(md or "<p>No assessment yet.</p>")
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
+                else:
+                    md = _load_assessment(rid)
+                    self._send_html(md or "<p>No assessment yet.</p>")
             elif path.startswith("/run/") and path.endswith("/report"):
-                rid = path.split("/")[2]
-                rp = runs_base / rid / "swarm-report.md"
-                if rp.exists():
-                    self._send_html(rp.read_text())
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
                 else:
-                    self._send_html("<p>Report not ready yet. Agents still running.</p>")
+                    rp = runs_base / rid / "swarm-report.md"
+                    if rp.exists():
+                        self._send_html(rp.read_text())
+                    else:
+                        self._send_html("<p>Report not ready yet. Agents still running.</p>")
             elif re.match(r"^/run/[^/]+/tracking\.json$", path):
-                rid = path.split("/")[2]
-                tp = runs_base / rid / "tracking.json"
-                if tp.exists():
-                    self._send_json(json.loads(tp.read_text()))
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
                 else:
-                    self._send_json({})
+                    tp = runs_base / rid / "tracking.json"
+                    if tp.exists():
+                        self._send_json(json.loads(tp.read_text()))
+                    else:
+                        self._send_json({})
             elif path.startswith("/run/") and path.endswith("/connections"):
-                rid = path.split("/")[2]
-                cp = runs_base / rid / "connections.md"
-                if cp.exists():
-                    self._send_html(cp.read_text())
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
                 else:
-                    self._send_html("<p>Connections analysis not ready yet.</p>")
+                    cp = runs_base / rid / "connections.md"
+                    if cp.exists():
+                        self._send_html(cp.read_text())
+                    else:
+                        self._send_html("<p>Connections analysis not ready yet.</p>")
             elif path.startswith("/run/") and path.endswith("/stats"):
-                rid = path.split("/")[2]
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
+                    return
                 tr_path = runs_base / rid / "tracking.json"
                 if not tr_path.exists():
                     self._send_json({"error": "run not found"}, 404)
@@ -974,10 +995,9 @@ def _dashboard(args):
                     tr = json.loads(tr_path.read_text())
                     vd = runs_base / rid / "vessels"
                     # Use worker's extract_stats (agnostic — no hardcoded stats)
-                    from sirb.core.registry import WorkerRegistry
                     reg = _get_registry()
-                    worker_name = tr.get("worker", "shipcrawler")
-                    if worker_name not in reg:
+                    worker_name = tr.get("worker", "")
+                    if not worker_name or worker_name not in reg:
                         self._send_json({"error": f"worker '{worker_name}' not installed"})
                         return
                     worker = reg[worker_name]
@@ -1028,23 +1048,29 @@ def _dashboard(args):
                             self._send_html("<p>File not found.</p>", 404)
             elif re.match(r"^/run/[^/]+/targets$", path):
                 # List per-target report files (agnostic — used by per_target tabs)
-                rid = path.split("/")[2]
-                vdir = runs_base / rid / "vessels"
-                if vdir.exists():
-                    targets = []
-                    for v in sorted(vdir.iterdir()):
-                        if v.is_dir():
-                            files = sorted(f.name for f in v.iterdir()
-                                          if f.suffix in (".md", ".log", ".txt")
-                                          and f.stat().st_size > 0)
-                            if files:
-                                targets.append({"target": v.name, "files": files})
-                    self._send_json(targets)
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
                 else:
-                    self._send_json([])
+                    vdir = runs_base / rid / "vessels"
+                    if vdir.exists():
+                        targets = []
+                        for v in sorted(vdir.iterdir()):
+                            if v.is_dir():
+                                files = sorted(f.name for f in v.iterdir()
+                                              if f.suffix in (".md", ".log", ".txt")
+                                              and f.stat().st_size > 0)
+                                if files:
+                                    targets.append({"target": v.name, "files": files})
+                        self._send_json(targets)
+                    else:
+                        self._send_json([])
 
             elif re.match(r"^/run/[^/]+/terminal$", path):
-                rid = path.split("/")[2]
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
+                    return
                 vessels_dir = runs_base / rid / "vessels"
                 events = []
                 if vessels_dir.exists():
@@ -1067,21 +1093,24 @@ def _dashboard(args):
                 self._send_json(events)
 
             elif re.match(r"^/run/[^/]+/vessels$", path):
-                rid = path.split("/")[2]
-                vdir = runs_base / rid / "vessels"
-                if vdir.exists():
-                    vessels = []
-                    for v in sorted(vdir.iterdir()):
-                        if v.is_dir():
-                            files = sorted(f.name for f in v.iterdir() if f.suffix in (".md", ".log", ".txt") and f.stat().st_size > 0)
-                            if files:
-                                vessels.append({"target": v.name, "files": files})
-                        elif v.suffix in (".log", ".txt", ".md"):
-                            # Also include flat log files
-                            pass
-                    self._send_json(vessels)
+                rid = self._safe_rid(path.split("/")[2])
+                if rid is None:
+                    self._send_400("Invalid run id")
                 else:
-                    self._send_json([])
+                    vdir = runs_base / rid / "vessels"
+                    if vdir.exists():
+                        vessels = []
+                        for v in sorted(vdir.iterdir()):
+                            if v.is_dir():
+                                files = sorted(f.name for f in v.iterdir() if f.suffix in (".md", ".log", ".txt") and f.stat().st_size > 0)
+                                if files:
+                                    vessels.append({"target": v.name, "files": files})
+                            elif v.suffix in (".log", ".txt", ".md"):
+                                # Also include flat log files
+                                pass
+                        self._send_json(vessels)
+                    else:
+                        self._send_json([])
             elif path == "/map":
                 self._serve_map_html()
             elif path == "/models":
@@ -1157,14 +1186,12 @@ def _dashboard(args):
                 if targets and targets[0].get("type") == "port" and targets[0]["target"].startswith("port:"):
                     port_key = targets[0]["target"][5:]
                     try:
-                        from shipcrawler_worker.discovery import PortConfig
-                        pc = PortConfig()
-                        pd = pc.get(port_key)
+                        pd = reg[wname].resolve_port_config(port_key)
                         if pd:
                             port_cfg = {port_key: {
-                                "vessel_finder_url": pd.vessel_finder_url,
-                                "lat_min": pd.lat_min, "lat_max": pd.lat_max,
-                                "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                                "vessel_finder_url": pd.get("vessel_finder_url", ""),
+                                "lat_min": pd.get("lat_min"), "lat_max": pd.get("lat_max"),
+                                "lon_min": pd.get("lon_min"), "lon_max": pd.get("lon_max")}}
                             os.environ["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
                             import asyncio
                             discovered = asyncio.run(reg[wname].discover())
@@ -1191,7 +1218,10 @@ def _dashboard(args):
                 rundir.mkdir(parents=True, exist_ok=True)
                 vessels_dir = rundir / "vessels"
                 vessels_dir.mkdir(exist_ok=True)
-                worker_name = params.get("worker", ["shipcrawler"])[0].strip() or "shipcrawler"
+                # Default to first registered worker (agnostic — no hardcoded name)
+                _reg = _get_registry()
+                _default_worker = next(iter(_reg), "") if _reg else ""
+                worker_name = params.get("worker", [_default_worker])[0].strip() or _default_worker
                 tracking = {"run_id": run_id, "targets": mmsi_list, "mode": mode, "model": model or "deepseek-v4-flash",
                              "worker": worker_name,
                              "batch": batch,
@@ -1200,7 +1230,7 @@ def _dashboard(args):
                 (rundir / "tracking.json").write_text(json.dumps(tracking))
 
                 # Spawn hermes agents in background thread
-                def _run_swarm(rid, targets, md, prof, mod, prov="", worker_name="shipcrawler", batch=10):
+                def _run_swarm(rid, targets, md, prof, mod, prov="", worker_name="", batch=10):
                     """Run tasks via core kernel (TaskQueue + WorkerPool + Blackboard).
 
                     Agnostic: discovers workers via pip entry points — sirb
@@ -1240,14 +1270,12 @@ def _dashboard(args):
                         # Port scan mode: set SIRB_WORKER_CONFIG and use worker.discover()
                         port_key = port_targets[0][5:]  # strip "port:" prefix
                         try:
-                            from shipcrawler_worker.discovery import PortConfig
-                            pc = PortConfig()
-                            pd = pc.get(port_key)
+                            pd = worker.resolve_port_config(port_key)
                             if pd:
                                 port_cfg = {port_key: {
-                                    "vessel_finder_url": pd.vessel_finder_url,
-                                    "lat_min": pd.lat_min, "lat_max": pd.lat_max,
-                                    "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                                    "vessel_finder_url": pd.get("vessel_finder_url", ""),
+                                    "lat_min": pd.get("lat_min"), "lat_max": pd.get("lat_max"),
+                                    "lon_min": pd.get("lon_min"), "lon_max": pd.get("lon_max")}}
                                 os.environ["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
                         except Exception:
                             pass
@@ -1360,7 +1388,7 @@ def _dashboard(args):
                     report = _generate_swarm_report(rid, targets, md, agents, connections)
                     (runs_base / rid / "swarm-report.md").write_text(report)
 
-                def _run_swarm_safe(rid, targets, md, prof, mod, prov, worker_name="shipcrawler", batch=10):
+                def _run_swarm_safe(rid, targets, md, prof, mod, prov, worker_name="", batch=10):
                     try:
                         _run_swarm(rid, targets, md, prof, mod, prov, worker_name, batch)
                     except Exception as e:
@@ -1368,8 +1396,10 @@ def _dashboard(args):
                         tb = traceback.format_exc()
                         print(f"[sirb] ERROR in _run_swarm thread: {e}\n{tb}", flush=True)
 
-                # Get worker from POST params or default
-                worker_name = params.get("worker", ["shipcrawler"])[0].strip() or "shipcrawler"
+                # Get worker from POST params or default to first registered
+                _reg = _get_registry()
+                _default_worker = next(iter(_reg), "") if _reg else ""
+                worker_name = params.get("worker", [_default_worker])[0].strip() or _default_worker
 
                 thread = threading.Thread(
                     target=_run_swarm_safe,
@@ -1446,18 +1476,19 @@ def _dashboard(args):
                 if not port_key:
                     self._send_json({"error": "port required"}, 400)
                     return
-                # Look up port definition from PortConfig
+                # Look up port definition from worker (agnostic — no hardcoded import)
+                reg = _get_registry()
+                _wname = params.get("worker", [""])[0].strip()
+                _worker = reg.get(_wname) if _wname else (next(iter(reg.values()), None) if reg else None)
                 try:
-                    from shipcrawler_worker.discovery import PortConfig
-                    pc = PortConfig()
-                    pd = pc.get(port_key)
+                    pd = _worker.resolve_port_config(port_key) if _worker else None
                     if not pd:
                         self._send_json({"error": f"Unknown port: {port_key}"}, 400)
                         return
                     # Spawn run with port config in environment
-                    port_cfg = {port_key: {"vessel_finder_url": pd.vessel_finder_url,
-                                            "lat_min": pd.lat_min, "lat_max": pd.lat_max,
-                                            "lon_min": pd.lon_min, "lon_max": pd.lon_max}}
+                    port_cfg = {port_key: {"vessel_finder_url": pd.get("vessel_finder_url", ""),
+                                            "lat_min": pd.get("lat_min"), "lat_max": pd.get("lat_max"),
+                                            "lon_min": pd.get("lon_min"), "lon_max": pd.get("lon_max")}}
                     hermes_python = sys.executable
                     env = os.environ.copy()
                     env["SIRB_WORKER_CONFIG"] = json.dumps({"ports": port_cfg})
@@ -1520,7 +1551,6 @@ def _dashboard(args):
         def _send_json(self, data, status=200):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode())
 
@@ -1529,6 +1559,15 @@ def _dashboard(args):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(html.encode())
+
+        def _safe_rid(self, rid):
+            """Validate run-id against path traversal. Returns rid or None."""
+            if not rid or ".." in rid or "/" in rid:
+                return None
+            return rid
+
+        def _send_400(self, msg="Bad request"):
+            self._send_json({"error": msg}, 400)
 
         _LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo.png")
 
@@ -1556,6 +1595,7 @@ def _dashboard(args):
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNThhNmZmIiBzdHJva2Utd2lkdGg9IjIiPjxwYXRoIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTUtMTAtNXoiLz48cGF0aCBkPSJNMiAxN2wxMCA1IDEwLTUiLz48cGF0aCBkPSJNMiAxMmwxMCA1IDEwLTUiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjIiIHI9IjEuNSIgZmlsbD0iIzU4YTZmZmYiLz48Y2lyY2xlIGN4PSIyIiBjeT0iNyIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjEuNSIgZmlsbD0iIzU4YTZmZiIvPjxjaXJjbGUgY3g9IjIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMS41IiBmaWxsPSIjNThhNmZmIi8+PGNpcmNsZSBjeD0iMiIgY3k9IjE3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIyMiIgY3k9IjE3IiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjIyIiByPSIxLjUiIGZpbGw9IiM1OGE2ZmYiLz48L3N2Zz4=">
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1802,11 +1842,11 @@ async function renderReportTabs(tabs,rid,workerName){let html="";for(const t of 
 
 
 
-async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML='<div class="md-content">'+marked.parse(text)+'</div>'}
+async function loadVesselFile(rid,target,file){const r=await fetch("/run/"+rid+"/vessel/"+target+"/"+file);const text=await r.text();const key="vessel_"+target+"_"+file;reportCache[key]=text;switchTab(key);document.getElementById("report-title").textContent=target+"/"+file;const view=document.getElementById("assessment-view");view.innerHTML='<div class="md-content">'+DOMPurify.sanitize(marked.parse(text))+'</div>'}
 
 function switchTab(tab){document.querySelectorAll(".tab-btn,.vessel-btn").forEach(b=>b.classList.remove("active"));if(tab=="swarm"){var sb=document.querySelector('[data-tab="swarm"]');if(sb)sb.classList.add("active");renderTab("swarm")}else if(tab=="terminal"){var tb=document.querySelector('[data-tab="terminal"]');if(tb)tb.classList.add("active");renderTerminalTab(currentRunId)}else{document.querySelectorAll(".vessel-btn").forEach(b=>{if(b.textContent.includes(tab))b.classList.add("active")});renderTab(tab)}}
 
-function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab=="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}if(content){let prefix="";if(tab=="swarm"&&reportCache._vesselList){prefix=reportCache._vesselList}view.innerHTML=prefix+'<div class="md-content">'+marked.parse(content)+'</div>'}else if(tab=="swarm"){view.innerHTML=reportCache._vesselList||'<span style="color:var(--text-3)">Loading swarm report...</span>'}}
+function renderTab(tab){const view=document.getElementById("assessment-view");const content=reportCache[tab];if(tab=="swarm"){document.getElementById("report-title").textContent="swarm-report.md"}if(content){let prefix="";if(tab=="swarm"&&reportCache._vesselList){prefix=reportCache._vesselList}view.innerHTML=prefix+'<div class="md-content">'+DOMPurify.sanitize(marked.parse(content))+'</div>'}else if(tab=="swarm"){view.innerHTML=reportCache._vesselList||'<span style="color:var(--text-3)">Loading swarm report...</span>'}}
 
 function escapeHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}async function renderTerminalTab(rid){const view=document.getElementById("assessment-view");document.getElementById("report-title").textContent="terminal.log";view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;">Loading terminal...</div>';try{const r=await fetch("/run/"+rid+"/terminal");const events=await r.json();if(!events.length){view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;padding:1rem;">No agent logs found for this run.</div>';return}let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.75rem;line-height:1.5;padding:0.3rem;">';html+='<div style="color:var(--accent);font-weight:600;margin-bottom:0.5rem;">$ sirb --replay '+rid+'</div>';const colors=["#58a6ff","#3fb950","#f85149","#bf8700","#a371f7"];let lastTarget="";let ci=0;const targetColors={};events.forEach(ev=>{if(!(ev.target in targetColors)){targetColors[ev.target]=colors[ci%colors.length];ci++}const c=targetColors[ev.target];const line=ev.line;if(line.startsWith(("─","╭","├","└","│","╰")))return;if(line.length<2)return;html+='<div style="display:flex;gap:0.4rem;padding:0.05rem 0;"><span style="color:'+c+';font-weight:600;flex-shrink:0;font-size:0.68rem;">['+ev.target.slice(0,8)+']</span><span style="color:var(--text-2);overflow:hidden;text-overflow:ellipsis;">'+escapeHtml(line.slice(0,200))+'</span></div>'});html+="</div>";view.innerHTML=html}catch(e){view.innerHTML='<div style="color:var(--text-3);font-size:0.82rem;padding:1rem;">Error loading terminal: '+e.message+'</div>'}}
 
@@ -1850,7 +1890,6 @@ document.getElementById("live-stats").innerHTML="";document.getElementById("agen
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
             # Always send a heartbeat so the browser fires onopen
@@ -1975,10 +2014,10 @@ document.getElementById("live-stats").innerHTML="";document.getElementById("agen
                 except Exception:
                     return None
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), DashHandler)
+    server = ThreadingHTTPServer((args.host, port), DashHandler)
     server.socket.settimeout(1.0)  # don't hang forever on stale connections
     server.timeout = 0.5
-    print(f"[sirb] Dashboard at http://0.0.0.0:{port}")
+    print(f"[sirb] Dashboard at http://{args.host}:{port}")
     print(f"[sirb] Watching runs at {runs_base}")
     try:
         server.serve_forever()
