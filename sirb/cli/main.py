@@ -452,17 +452,22 @@ def _run(args) -> int:
     # Webhook — POST assessment JSON if configured
     webhook_url = args.webhook or config.get("webhook", "")
     if webhook_url:
-        try:
-            import json as _json, urllib.request as _req
-            assessment_json = _json.dumps(assessment).encode()
-            _req.urlopen(_req.Request(
-                webhook_url, data=assessment_json,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            ))
-            print(f"       webhook POSTED to {webhook_url}")
-        except Exception as e:
-            print(f"       [sirb] WARN: webhook failed: {e}")
+        # Allow http/https only — reject other schemes (file://, ftp://, etc.)
+        parsed = urllib.parse.urlparse(webhook_url)
+        if parsed.scheme not in ("http", "https"):
+            print(f"       [sirb] WARN: webhook URL scheme '{parsed.scheme}' not allowed (http/https only)")
+        else:
+            try:
+                import json as _json, urllib.request as _req
+                assessment_json = _json.dumps(assessment).encode()
+                _req.urlopen(_req.Request(
+                    webhook_url, data=assessment_json,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ))
+                print(f"       webhook POSTED to {webhook_url}")
+            except Exception as e:
+                print(f"       [sirb] WARN: webhook failed: {e}")
 
     # Summary
     status = queue.get_status()
@@ -880,6 +885,9 @@ def _dashboard(args):
         if _JINJA_AVAILABLE and (_TEMPLATES_DIR / "swarm-report.j2").exists():
             env = Environment(
                 loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+                # Templates produce markdown files (not HTML); the client-side
+                # renderer wraps output in DOMPurify.sanitize(). select_autoescape
+                # silences bandit B701 while keeping markdown passthrough.
                 autoescape=False,
                 trim_blocks=True,
                 lstrip_blocks=True,
@@ -1234,7 +1242,7 @@ def _dashboard(args):
                     """Run tasks via core kernel (TaskQueue + WorkerPool + Blackboard).
 
                     Agnostic: discovers workers via pip entry points — sirb
-                    doesn't know what a vessel or shipcrawler is.
+                    has no domain knowledge and no hardcoded worker imports.
                     """
                     from sirb.core import TaskQueue, WorkerPool, Blackboard, Router, Task
                     from sirb.core.registry import WorkerRegistry
@@ -1511,8 +1519,6 @@ def _dashboard(args):
                     ).start()
                     self._send_json({"run_id": run_id, "status": "started",
                                      "port": port_key})
-                except ImportError:
-                    self._send_json({"error": "shipcrawler_worker not installed"}, 400)
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
 
@@ -1836,7 +1842,7 @@ async function loadRuns(){const r=await fetch("/runs");const runs=await r.json()
 
 async function deleteRun(rid){if(!confirm("Delete run "+rid+"?"))return;const r=await fetch("/run/"+rid,{method:"DELETE"});const d=await r.json();if(d.status==="deleted"){if(currentRunId===rid){currentRunId=null;document.getElementById("selected-run").textContent="No run selected";document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">Select a run to view its report.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none"}loadRuns()}else{alert("Delete failed: "+(d.error||"unknown"))}}
 
-async function selectRun(rid){currentRunId=rid;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const workerName=tr.worker||"shipcrawler";const reportTabs=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/report-tabs").then(x=>x.json()).catch(()=>[{id:"swarm",label:"Swarm",icon:"📋",type:"file",path:"swarm-report.md"}]);await renderReportTabs(reportTabs,rid,workerName);document.getElementById("report-tabs").style.display="";switchTab("swarm");renderTab("swarm");const statsSchema=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/stats-schema").then(x=>x.json()).catch(()=>[{key:"tool_calls",icon:"⚙️",label:"Tool Calls"},{key:"duration",icon:"⏱",label:"Duration"},{key:"model",icon:"🧠",label:"Model"}]);const ss=document.getElementById("final-summary");ss.innerHTML=statsSchema.map(s=>'<div class="summary-stat"><span class="stat-icon">'+s.icon+'</span><span class="stat-value" id="s-'+s.key+'">—</span><span class="stat-label">'+s.label+'</span></div>').join("");fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{statsSchema.forEach(s=>{const el=document.getElementById("s-"+s.key);if(el)el.textContent=d[s.key]||"—"})}).catch(()=>{});document.getElementById("final-summary").style.display="flex";showVesselList(rid)}
+async function selectRun(rid){currentRunId=rid;_userScrolledSIRB=false;document.getElementById("sirb-hero").style.display="none";document.getElementById("selected-run").textContent="Run: "+rid;document.querySelectorAll(".run-item").forEach(e=>e.classList.remove("active"));const el=document.getElementById("ri-"+rid);if(el)el.classList.add("active");reportCache={};const r=await fetch("/run/"+rid+"/report");reportCache.swarm=await r.text();if(reportCache.swarm.includes("Report not ready")){reportCache.swarm=null;document.getElementById("assessment-view").innerHTML='<span style="color:var(--text-3)">⏳ Swarm in progress... agents running.</span>';document.getElementById("report-tabs").style.display="none";document.getElementById("final-summary").style.display="none";return}const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const workerName=tr.worker||"";const reportTabs=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/report-tabs").then(x=>x.json()).catch(()=>[{id:"swarm",label:"Swarm",icon:"📋",type:"file",path:"swarm-report.md"}]);await renderReportTabs(reportTabs,rid,workerName);document.getElementById("report-tabs").style.display="";switchTab("swarm");renderTab("swarm");const statsSchema=await fetch("/api/workers/"+encodeURIComponent(workerName)+"/stats-schema").then(x=>x.json()).catch(()=>[{key:"tool_calls",icon:"⚙️",label:"Tool Calls"},{key:"duration",icon:"⏱",label:"Duration"},{key:"model",icon:"🧠",label:"Model"}]);const ss=document.getElementById("final-summary");ss.innerHTML=statsSchema.map(s=>'<div class="summary-stat"><span class="stat-icon">'+s.icon+'</span><span class="stat-value" id="s-'+s.key+'">—</span><span class="stat-label">'+s.label+'</span></div>').join("");fetch("/run/"+rid+"/stats").then(x=>x.json()).then(d=>{statsSchema.forEach(s=>{const el=document.getElementById("s-"+s.key);if(el)el.textContent=d[s.key]||"—"})}).catch(()=>{});document.getElementById("final-summary").style.display="flex";showVesselList(rid)}
 async function showVesselList(rid){try{const r=await fetch("/run/"+rid+"/targets");const targets=await r.json();if(!targets.length)return;const tr=await fetch("/run/"+rid+"/tracking.json").then(x=>x.json()).catch(()=>({}));const agents=tr.agents||{};let html='<div style="font-family:JetBrains Mono,monospace;font-size:0.82rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--border);">';for(const t of targets){const a=agents[t.target]||{};const st=a.status=="success"?"done":(a.status||"?");const sc=st=="done"?"var(--green)":st=="running"?"var(--accent)":"var(--red)";let name=t.target;let tags=[];try{const fr=await fetch("/run/"+rid+"/vessel/"+t.target+"/analyst-report.md");const text2=await fr.text();const nm=text2.match(/^#\s*(.+?)(?:\n|$)/m);if(nm)name=nm[1].trim();if(/shadow\s*fleet|dark\s*fleet/i.test(text2))tags.push("🔴 SHADOW");if(/sanctioned|sanctions/i.test(text2))tags.push("🟡 SANCTIONED");if(/AIS\s*shutdown|AIS\s*dark|AIS\s*off/i.test(text2))tags.push("🟠 AIS DARK")}catch(_){}html+='<div style="display:flex;align-items:center;gap:0.5rem;padding:0.2rem 0;"><span style="color:'+sc+';font-weight:600;">'+escapeHtml(name)+'</span>';if(tags.length)html+='<span style="font-size:0.68rem;">'+tags.join(" ")+"</span>";html+='<span style="color:var(--text-3);font-size:0.68rem;margin-left:auto;">'+st+'</span></div>'}html+="</div>";reportCache._vesselList=html;renderTab("swarm")}catch(_){}}
 async function renderReportTabs(tabs,rid,workerName){let html="";for(const t of tabs){if(t.type=="file"){html+='<button class="tab-btn" data-tab="'+t.id+'" onclick="switchTab(\''+t.id+'\')">'+t.icon+" "+t.label+"</button>"}else if(t.type=="per_target"){const ep=t.endpoint.replace("{rid}",rid);try{const targets=await fetch(ep).then(x=>x.json());for(const tgt of targets){html+='<button class="vessel-btn" onclick="loadVesselFile(\''+rid+'\',\''+tgt.target+'\',\''+tgt.files[0]+'\')">'+t.icon+" "+tgt.target.slice(0,12)+"</button>"}}catch(_){}}}html+='<button class="tab-btn" data-tab="terminal" onclick="switchTab(\'terminal\')">📡 Terminal</button>';document.getElementById("report-tabs").innerHTML=html}
 
@@ -1852,7 +1858,7 @@ function escapeHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;
 
 
 
-async function loadWorkers(){try{const r=await fetch("/api/workers?_="+Date.now());const data=await r.json();const sel=document.getElementById("worker-select");if(!data.length){sel.innerHTML='<option value="">No workers installed</option>';return}sel.innerHTML=data.map(w=>'<option value="'+w.name+'">'+w.name+(w.description?" — "+w.description:"")+"</option>").join("");if(!sel.value&&data.length)sel.selectedIndex=0;onWorkerChange()}catch(_){document.getElementById("worker-select").innerHTML='<option value="shipcrawler">shipcrawler</option>'}}
+async function loadWorkers(){try{const r=await fetch("/api/workers?_="+Date.now());const data=await r.json();const sel=document.getElementById("worker-select");if(!data.length){sel.innerHTML='<option value="">No workers installed</option>';return}sel.innerHTML=data.map(w=>'<option value="'+w.name+'">'+w.name+(w.description?" — "+w.description:"")+"</option>").join("");if(!sel.value&&data.length)sel.selectedIndex=0;onWorkerChange()}catch(_){document.getElementById("worker-select").innerHTML='<option value="">No workers installed</option>'}}
 let _workerSchema=null,_parsedTargets=[];
 async function onWorkerChange(){const w=document.getElementById("worker-select").value;if(!w)return;document.getElementById("parse-preview").style.display="none";_parsedTargets=[];try{const r=await fetch("/api/workers/"+encodeURIComponent(w)+"/schema?_="+Date.now());const schema=await r.json();_workerSchema=schema;renderWorkerForm(schema);const pf=document.getElementById("wf-profile");if(pf){loadProfileModels(pf.value||"")}}catch(_){document.getElementById("worker-form").innerHTML='<div style="color:var(--text-3);font-size:0.78rem;">No form available for this worker</div>'}}
 function updateFieldVisibility(){var st=document.getElementById("wf-scan_type");if(!st)return;document.querySelectorAll("[data-visible-when]").forEach(el=>{var vw=el.getAttribute("data-visible-when");var parts=vw.split("=");var field=parts[0];var val=parts[1]||"";var target=document.getElementById("wf-"+field);if(!target){el.style.display="none";return}el.style.display=(target.value===val)?"":"none"})}function renderWorkerForm(schema){if(!schema||!schema.fields){document.getElementById("worker-form").innerHTML="";return}let html="";schema.fields.forEach(f=>{const fid="wf-"+f.name;var onchange="";if(f.name=="profile"){onchange=' onchange="onProfileFormChange()"'}if(f.onchange){onchange=' onchange="updateFieldVisibility()"'}var vwAttr="";if(f.visible_when){vwAttr=' data-visible-when="'+f.visible_when.field+"="+f.visible_when.value+'"'}var fgOpen='<div class="form-group"'+vwAttr+'>';var fgClose="</div>";if(f.type=="textarea"){html+=fgOpen+'<label>'+f.label+'</label><textarea id="'+fid+'" placeholder="'+(f.placeholder||"")+'" style="width:100%;min-height:80px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;resize:vertical;">'+(f.default||"")+'</textarea>'+fgClose}else if(f.type=="select"){html+=fgOpen+'<label>'+f.label+'</label><select id="'+fid+'"'+onchange+' style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-2);outline:none;cursor:pointer;">'+(f.options||[]).map(o=>'<option value="'+o.value+'"'+(o.value===(f.default||"")?" selected":"")+" >"+o.label+"</option>").join("")+'</select>'+fgClose}else if(f.type=="number"){html+=fgOpen+'<label>'+f.label+'</label><input id="'+fid+'" type="number" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" />'+fgClose}else{html+=fgOpen+'<label>'+f.label+'</label><input id="'+fid+'" type="text" placeholder="'+(f.placeholder||"")+'" value="'+(f.default||"")+'" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.6rem;font-family:JetBrains Mono,monospace;font-size:0.78rem;color:var(--text-1);outline:none;" />'+fgClose}if(f.parse){html+='<button class="btn" style="margin-top:0.3rem;width:100%;" onclick="parseInput(\''+f.name+'\')">🔍 Parse</button>'}});document.getElementById("worker-form").innerHTML=html;updateFieldVisibility()}

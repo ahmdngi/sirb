@@ -72,6 +72,9 @@ class Aggregator:
         if _JINJA_AVAILABLE and (_TEMPLATES_DIR / "assessment.j2").exists():
             env = Environment(
                 loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+                # Template produces markdown (not HTML); output is rendered
+                # client-side with DOMPurify sanitization. autoescape=False
+                # is intentional for markdown passthrough (bandit B701 benign).
                 autoescape=False,
                 trim_blocks=True,
                 lstrip_blocks=True,
