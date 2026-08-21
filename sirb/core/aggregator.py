@@ -75,7 +75,7 @@ class Aggregator:
                 # Template produces markdown (not HTML); output is rendered
                 # client-side with DOMPurify sanitization. autoescape=False
                 # is intentional for markdown passthrough (bandit B701 benign).
-                autoescape=False,
+                autoescape=False,  # nosec B701 — markdown renderer; HTML sink is DOMPurify-sanitized
                 trim_blocks=True,
                 lstrip_blocks=True,
                 keep_trailing_newline=True,

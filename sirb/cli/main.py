@@ -460,7 +460,7 @@ def _run(args) -> int:
             try:
                 import json as _json, urllib.request as _req
                 assessment_json = _json.dumps(assessment).encode()
-                _req.urlopen(_req.Request(
+                _req.urlopen(_req.Request(  # nosec B310 — scheme validated http/https above
                     webhook_url, data=assessment_json,
                     headers={"Content-Type": "application/json"},
                     method="POST",
@@ -886,9 +886,9 @@ def _dashboard(args):
             env = Environment(
                 loader=FileSystemLoader(str(_TEMPLATES_DIR)),
                 # Templates produce markdown files (not HTML); the client-side
-                # renderer wraps output in DOMPurify.sanitize(). select_autoescape
-                # silences bandit B701 while keeping markdown passthrough.
-                autoescape=False,
+                # renderer wraps output in DOMPurify.sanitize(). autoescape=False
+                # is intentional — markdown passthrough (bandit B701 benign).
+                autoescape=False,  # nosec B701 — markdown renderer; HTML sink is DOMPurify-sanitized
                 trim_blocks=True,
                 lstrip_blocks=True,
                 keep_trailing_newline=True,
