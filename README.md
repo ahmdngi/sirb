@@ -26,8 +26,8 @@ blackboard with pheromone decay, and checkpoints state to disk for crash recover
 | Skill | Description |
 |-------|-------------|
 | [**shipcrawler-worker**](https://github.com/ahmdngi/shipcrawler-worker) | Vessel OSINT worker — wraps the shipcrawler-parallel pipeline as a SirbWorker |
-| [**shipcrawler**](https://github.com/ahmdngi/shipcrawler-v4) | Agent-driven sequential ShipCrawler (~10 min). Deeper than the parallel pipeline. |
-| [**shipcrawler-parallel**](https://github.com/ahmdngi/shipcrawler-parallel) | Fast parallel pipeline (~2 min). Used by shipcrawler-worker internally. |
+| [**shipcrawler**](https://github.com/ahmdngi/shipCrawler) | Agent-driven sequential ShipCrawler (~10 min). Deeper than the parallel pipeline. |
+| [**shipcrawler-mcp**](https://github.com/ahmdngi/shipcrawler-mcp) | Model Context Protocol server exposing ShipCrawler OSINT tools as typed MCP tools |
 
 ## Quick Start
 
