@@ -129,6 +129,28 @@ sirb run
               └────────────────────────┘
 ```
 
+### Diagram
+
+<p align="center">
+  <img src="assets/diagram/sirb-architecture.dark.png" alt="Sirb architecture: TaskQueue, WorkerPool, Router, WorkerRegistry, SirbWorker contract, one hermes chat process per target, Blackboard, Aggregator, run artifacts" width="900">
+</p>
+
+Generated from a typed spec, not hand-drawn: [**`assets/diagram/sirb-architecture.json`**](assets/diagram/sirb-architecture.json).
+Each box carries an `SRC n` marker pinning it to a real file and line range at commit [`52bc41aa`](https://github.com/ahmdngi/sirb/blob/52bc41aa2937f09e2efff0975184eccc8bdabe54), so the picture cannot drift from the code.
+
+| Artifact | What it is |
+|----------|------------|
+| [`sirb-architecture.html`](assets/diagram/sirb-architecture.html) | Interactive and self-contained: inline SVG, pan/zoom, search, focus, light/dark. Opens offline, no CDN. |
+| [`sirb-architecture.dark.png`](assets/diagram/sirb-architecture.dark.png) · [light version](assets/diagram/sirb-architecture.light.png) | 2048×1320 renders |
+| [`sirb-architecture.json`](assets/diagram/sirb-architecture.json) | The spec. Source of truth for the diagram. |
+
+Two boundaries are drawn because the code enforces them: the kernel and CLI hold no domain code, and the only
+edge leaving that region is a worker spawning one agent process per target.
+
+Regenerate with [Archify](https://github.com/tt-a1i/archify): `validate` then `deliver` on the spec with `--repo-root .`.
+The artifact must report 9/9 checks with 0 composition errors and 0 warnings before it is committed
+(current artifact `f42bf428…`, 814,820 bytes).
+
 ## Install
 
 ```bash
@@ -245,6 +267,86 @@ Package separately and pip-install. Sirb will auto-discover it via entry points.
 tests/ ── 70+ tests (core + queue + dedup + throttling + triggers +
               correlation + aggregator + health + webhook + trends)
 ```
+
+## Reproducibility
+
+Sirb reproduces from a clean host in four steps: install, workers, runtime pin, run.
+
+### 1. Install
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install git+https://github.com/ahmdngi/sirb.git
+python -m pytest -q tests/        # kernel test suite, 70+ tests
+sirb list-workers                 # lists discovered workers
+```
+
+No runtime dependencies beyond the Python standard library. Jinja2 is optional: without it the
+aggregator falls back to an inline markdown renderer.
+
+### 2. Install a worker
+
+Workers are separate packages, found through the `sirb_workers` entry-point group:
+
+```bash
+pip install git+https://github.com/ahmdngi/shipcrawler-worker.git
+sirb list-workers                 # shipcrawler: Vessel OSINT ...
+```
+
+Sirb never imports a worker's modules. The registry resolves the entry point and the router dispatches
+by `Task.worker`, which is why a new worker needs no change to this repository.
+
+### 3. Pin the runtime
+
+The worker, not Sirb, spawns the agent process. The command it issues is:
+
+```bash
+hermes chat -q "<prompt>" --skills <skill> -t web,terminal,file --yolo \
+  --profile <profile> --model <model> --max-turns 150
+```
+
+Model and profile are configuration, so pin them before any run you intend to compare or publish. In this
+repository `sirb/cli/profiles-models.json` carries the pins the dashboard dropdown serves, and the
+`shipcrawler` profile is pinned to `glm-5.3` (commit `52bc41a`). Never pass `--provider` alongside
+`--profile`: the profile config already resolves the provider.
+
+### 4. Run
+
+```bash
+sirb run                        # tasks from each worker's discover()
+sirb run --tasks targets.json   # tasks from a JSON file
+sirb run --resume <run_id>      # continue from the last checkpoint
+sirb dashboard                  # web UI on :8502 over the same kernel
+```
+
+Concurrency is `min(len(targets), batch)`. The CLI applies `--task-timeout` (default 300 s per task);
+the dashboard pool runs without a per-task ceiling.
+
+### What a run leaves behind
+
+```
+<output_dir>/<run_id>/
+  tracking.json      run status and per-agent state
+  blackboard.json    every Finding the agents produced
+  swarm-report.md    combined report
+  connections.md     cross-target links
+  vessels/<target>.log            live agent transcript
+  vessels/<target>/               the per-target report files
+```
+
+A run is complete and verifiable from files alone: `tracking.json` reports `done`, and every target has a
+log plus its report files. Re-running the same configuration reproduces that structure.
+
+### What is reproducible, and what is not
+
+Reproducible: the install path, the worker version, the profile and model pins, the concurrency setting and
+the artifact layout. Given the same configuration, a rerun produces the same structure and the same class of
+findings.
+
+Not reproducible transcript for transcript. The agents are adaptive: they choose their own investigation path
+from what they find, so two runs on the same target can differ in sequence and in wording. Treat the
+configuration and the run artifacts as the reproducible unit, and compare runs at report level (findings and
+risk tier per target) rather than diffing transcripts.
 
 ## Workers
 

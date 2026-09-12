@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Sirb: agnostic n-agent orchestration kernel",
+    "output": "sirb-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/ahmdngi/sirb",
+      "revision": "52bc41aa2937f09e2efff0975184eccc8bdabe54",
+      "provider": "github",
+      "link_mode": "web"
+    },
+    "views": [
+      { "id": "kernel-path", "label": "Kernel path", "focus": ["dashboard", "queue", "pool", "router", "worker"], "note": "From the launch panel through the queue, pool and router to the worker contract." },
+      { "id": "findings-path", "label": "Findings and output", "focus": ["agent", "blackboard", "aggregator", "reports"], "note": "How per-target agent output becomes a shared store and a report." },
+      { "id": "discovery", "label": "Worker discovery", "focus": ["registry", "router"], "note": "The plugin seam: workers are found by entry points, never imported by name." }
+    ]
+  },
+  "components": [
+    { "id": "dashboard", "type": "frontend", "label": "Sirb Dashboard", "sublabel": "HTTP + SSE :8502", "pos": [40, 140], "size": [150, 68], "sources": [{ "path": "sirb/cli/main.py", "line": 931, "end_line": 940, "label": "DashHandler" }] },
+    { "id": "queue", "type": "messagebus", "label": "TaskQueue", "sublabel": "dedup + priority", "pos": [300, 140], "size": [150, 68], "sources": [{ "path": "sirb/core/task_queue.py", "line": 12, "end_line": 31, "label": "TaskQueue" }] },
+    { "id": "pool", "type": "backend", "label": "WorkerPool", "sublabel": "ThreadPoolExecutor", "pos": [560, 140], "size": [150, 68], "sources": [{ "path": "sirb/core/worker_pool.py", "line": 17, "end_line": 43, "label": "WorkerPool" }] },
+    { "id": "router", "type": "backend", "label": "Router", "sublabel": "task.worker dispatch", "pos": [820, 140], "size": [150, 68], "sources": [{ "path": "sirb/core/router.py", "line": 12, "end_line": 20, "label": "Router" }] },
+    { "id": "registry", "type": "backend", "label": "WorkerRegistry", "sublabel": "pip entry points", "pos": [820, 30], "size": [150, 64], "sources": [{ "path": "sirb/core/registry.py", "line": 84, "end_line": 95, "label": "entry-point group" }] },
+    { "id": "worker", "type": "backend", "label": "SirbWorker", "sublabel": "plugin contract (ABC)", "pos": [1080, 140], "size": [150, 68], "sources": [{ "path": "sirb/core/worker_base.py", "line": 11, "end_line": 38, "label": "SirbWorker" }] },
+    { "id": "agent", "type": "external", "label": "hermes chat", "sublabel": "one process per target", "pos": [1080, 400], "size": [150, 68] },
+    { "id": "blackboard", "type": "database", "label": "Blackboard", "sublabel": "shared findings store", "pos": [820, 400], "size": [150, 68], "sources": [{ "path": "sirb/core/blackboard.py", "line": 13, "end_line": 36, "label": "Blackboard" }] },
+    { "id": "aggregator", "type": "backend", "label": "Aggregator", "sublabel": "Jinja2 report", "pos": [560, 400], "size": [150, 68], "sources": [{ "path": "sirb/core/aggregator.py", "line": 26, "end_line": 40, "label": "Aggregator" }] },
+    { "id": "reports", "type": "database", "label": "Run artifacts", "sublabel": "report + connections", "pos": [300, 400], "size": [150, 68] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Sirb kernel + CLI: zero domain code", "wraps": ["dashboard", "queue", "pool", "router", "registry", "worker"] },
+    { "kind": "region", "label": "Run directory: sirb-reports/<run_id>/", "wraps": ["blackboard", "aggregator", "reports"] }
+  ],
+  "connections": [
+    { "id": "dashboard-to-queue", "from": "dashboard", "to": "queue", "label": "enqueue", "variant": "emphasis" },
+    { "id": "queue-to-pool", "from": "queue", "to": "pool", "label": "claim" },
+    { "id": "pool-to-router", "from": "pool", "to": "router", "label": "resolve" },
+    { "id": "router-to-worker", "from": "router", "to": "worker", "label": "dispatch" },
+    { "id": "registry-to-router", "from": "registry", "to": "router", "label": "entry points", "variant": "dashed", "labelDy": 36 },
+    { "id": "worker-to-agent", "from": "worker", "to": "agent", "label": "spawn", "fromSide": "bottom", "toSide": "top", "labelDy": 96 },
+    { "id": "agent-to-blackboard", "from": "agent", "to": "blackboard", "label": "findings" },
+    { "id": "blackboard-to-aggregator", "from": "blackboard", "to": "aggregator", "label": "query" },
+    { "id": "aggregator-to-reports", "from": "aggregator", "to": "reports", "label": "render md" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Kernel", "items": ["sirb/core: 2,051 lines, no vessel, IMO or Shodan references", "Workers ship as pip packages and are never imported by name"] },
+    { "dot": "emerald", "title": "Runtime contract", "items": ["One hermes chat process per target; 900s per-run ceiling", "Findings on the blackboard, artifacts in the run directory"] },
+    { "dot": "amber", "title": "Scope, stated honestly", "items": ["Aggregator and TrendTracker are wired to sirb run, not the dashboard path", "Blackboard decay() is unit-tested but never invoked at runtime"] }
+  ]
+}
